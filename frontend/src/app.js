@@ -128,8 +128,16 @@ $('export').addEventListener('click', () => {
   window.location.href = `/api/sessions/${state.sid}/export.3mf`;
 });
 
-// 启动：建会话，导出/自动按钮按会话状态解锁
-newSession().then(refreshSession).then(() => {
+// 启动：?sid=xxx 恢复既有会话（服务重启后用脚本重建会话再引用），
+// 否则新建空会话；加载全部件几何
+const urlSid = new URLSearchParams(location.search).get('sid');
+const init = urlSid ? Promise.resolve(urlSid) : newSession();
+init.then((sid) => { state.sid = sid; return refreshSession(); }).then(async () => {
   $('autoassign').disabled = false;
   $('export').disabled = false;
+  for (const p of state.session.parts) {
+    await viewer.loadPart(state.sid, p.index, p.color);
+  }
+  viewer.frameAll();
+  if (state.session.parts.length) toast(`已加载 ${state.session.parts.length} 件`);
 }).catch((e) => toast(`初始化失败：${e.message}`));
