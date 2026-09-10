@@ -146,7 +146,8 @@ $('alignmode').addEventListener('click', () => {
   $('alignmode').classList.toggle('primary', state.align);
 });
 
-$('project').addEventListener('click', async () => {
+async function projectPaint(imageIndex) {
+  $('project').addEventListener = $('project').addEventListener; // no-op
   if (!state.session.parts.length) return;
   const cam = viewer.camera;
   const w = viewer.container.clientWidth, h = viewer.container.clientHeight;
@@ -155,7 +156,9 @@ $('project').addEventListener('click', async () => {
 
   // 1) 渲染图像素（cover 到视口尺寸，与叠加层一致）
   const img = new Image();
-  img.src = state.imageUrl;
+  img.src = imageIndex === undefined
+    ? state.imageUrl
+    : `/api/sessions/${state.sid}/image.png?i=${imageIndex}`;
   await img.decode();
   const ic = document.createElement('canvas');
   ic.width = w; ic.height = h;
@@ -164,6 +167,20 @@ $('project').addEventListener('click', async () => {
   const dw = img.naturalWidth * sc, dh = img.naturalHeight * sc;
   ictx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
   const imgData = ictx.getImageData(0, 0, w, h).data;
+  // 背景色估计（渲染图四角中值）：投影时跳过背景像素（不涂，保留既有色）
+  const corners = [];
+  for (const [y0, x0] of [[0, 0], [0, w - 9], [h - 9, 0], [h - 9, w - 9]]) {
+    for (let y = y0; y < y0 + 9; y += 4) for (let x = x0; x < x0 + 9; x += 4) {
+      const o = (y * w + x) * 4;
+      corners.push([imgData[o], imgData[o + 1], imgData[o + 2]]);
+    }
+  }
+  corners.sort((a, b) => (a[0] + a[1] + a[2]) - (b[0] + b[1] + b[2]));
+  const bgCol = corners[Math.floor(corners.length / 2)];
+  const isBgPixel = (o) => {
+    const dr = imgData[o] - bgCol[0], dg = imgData[o + 1] - bgCol[1], db = imgData[o + 2] - bgCol[2];
+    return Math.sqrt(dr * dr + dg * dg + db * db) < 42;
+  };
 
   // 2) 当前对齐位姿的深度缓冲（遮挡测试）
   const depth = viewer.projectDepthBuffer(cam, w, h);
@@ -248,6 +265,7 @@ $('project').addEventListener('click', async () => {
       if (fragZ > bufZ + TOL) continue;               // 被更近的几何遮挡
       // 采样渲染图 → 最近色板（HSV：色相主导，弱化光影明暗）
       const io = (py * w + px) * 4;
+      if (isBgPixel(io)) continue;                   // 渲染图背景像素：不采样
       const s0 = rgb2hsv(imgData[io], imgData[io + 1], imgData[io + 2]);
       const base = baseHSVof[pi];
       if (base && distHSV(s0, base) > REJECT_DIST) continue;   // 串色防护
@@ -283,7 +301,9 @@ $('project').addEventListener('click', async () => {
   $('alignhint').style.display = 'none';
   $('alignmode').classList.remove('primary');
   toast(`已投影上色 ${paintedTotal.toLocaleString()} 面（遮挡已剔除；多角度重复可覆盖全表面）`, 4500);
-});
+}
+window.__project = projectPaint;
+$('project').addEventListener('click', () => projectPaint());
 
 $('autoassign').addEventListener('click', async () => {
   const j = await api(`/api/sessions/${state.sid}/auto`, { method: 'POST' });

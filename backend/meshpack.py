@@ -22,6 +22,7 @@ def new_session() -> str:
         SESSIONS[sid] = {"parts": [], "palette": [], "palette_colors": [],
                          "up_axis": "y",  # STL 无坐标系元数据，合并 bbox 最长轴自动检测
                          "image_name": "", "image_pixels": None, "image_size": None,
+                         "images": [],   # 多渲染图像素缓存（投影按 index 取用）
                          "created": __import__("time").time()}
         # 会话数控制（自用）
         if len(SESSIONS) > 8:

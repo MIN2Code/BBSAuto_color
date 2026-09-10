@@ -56,7 +56,7 @@ async def upload_image(sid: str, file: UploadFile = File(...)):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"图片解析失败：{exc}") from exc
     sess = meshpack.get_session(sid)
-    # 缓存降采样像素（投影上色的采样源：后端做逐面采样）
+    # 缓存降采样像素（多图列表：投影按 image_index 取用）
     import numpy as np
     from PIL import Image as PILImage
     im = PILImage.open(io.BytesIO(data)).convert("RGB")
@@ -64,8 +64,11 @@ async def upload_image(sid: str, file: UploadFile = File(...)):
     if max(w, h) > 1024:
         sc = 1024 / max(w, h)
         im = im.resize((int(w * sc), int(h * sc)), PILImage.BILINEAR)
-    sess["image_pixels"] = np.asarray(im, dtype=np.uint8)
+    px = np.asarray(im, dtype=np.uint8)
+    sess.setdefault("images", []).append(px)
+    sess["image_pixels"] = px                      # 兼容：默认指向最后一张
     sess["image_size"] = [im.size[0], im.size[1]]
+    sess.setdefault("image_names", []).append(file.filename or f"img{len(sess['images'])}")
     # 多图色板合并：近色（欧氏 <40）占比加权保留，新图色补入
     merged = list(sess["palette"])
     for c in pal:
@@ -84,7 +87,10 @@ async def upload_image(sid: str, file: UploadFile = File(...)):
             near["ratio"] = round(w1 + w2, 3)
         else:
             merged.append(dict(c))
-    merged.sort(key=lambda x: -x["ratio"])
+    # 不重排（保持槽位稳定——已涂面的 paint_color 槽号绑定 palette 顺序）；
+    # 首次建板按占比排序，后续新色 append 尾部
+    if not any(c["ratio"] for c in merged):
+        merged.sort(key=lambda x: -x["ratio"])
     sess["palette"] = merged
     sess["palette_colors"] = [c["hex"] for c in merged]
     sess["image_name"] = (sess["image_name"] + " + " if sess["image_name"] else "") + (file.filename or "render.png")
@@ -100,12 +106,13 @@ def session_summary(sid: str):
 
 
 @router.get("/sessions/{sid}/image.png")
-def session_image(sid: str):
-    """恢复渲染图（投影采样缓存像素 → PNG）。"""
+def session_image(sid: str, i: int = -1):
+    """恢复渲染图（?i= 选择第几张；默认最后一张）。"""
     sess = meshpack.get_session(sid)
-    px = sess.get("image_pixels")
-    if px is None:
+    images = sess.get("images") or ([sess["image_pixels"]] if sess.get("image_pixels") else [])
+    if not images:
         raise HTTPException(404, "无渲染图")
+    px = images[ii] if 0 <= (ii := i if i >= 0 else len(images) - 1) < len(images) else images[-1]
     from PIL import Image
     im = Image.fromarray(px)
     buf = io.BytesIO()
@@ -194,9 +201,11 @@ def project_paint(sid: str, body: dict):
     import math
 
     sess = meshpack.get_session(sid)
-    px_img = sess.get("image_pixels")
-    if px_img is None:
+    images = sess.get("images") or ([sess["image_pixels"]] if sess.get("image_pixels") else [])
+    ii = int(body.get("image_index", len(images) - 1))
+    if not images or not (0 <= ii < len(images)):
         raise HTTPException(409, "先上传渲染图")
+    px_img = images[ii]
     ih, iw = px_img.shape[:2]
     pal_hex = sess.get("palette_colors") or []
     if not pal_hex:
