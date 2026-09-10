@@ -23,6 +23,6 @@ allmin = np.min([p['bbox'][0] for p in s['parts']], axis=0).tolist()
 allmax = np.max([p['bbox'][1] for p in s['parts']], axis=0).tolist()
 ctr = [(a + b) / 2 for a, b in zip(allmin, allmax)]
 r = c.post(f'{BASE}/sessions/{sid}/project', json={'camera': {
-    'eye': [ctr[0], ctr[1] - 160, ctr[2] + 25], 'target': ctr, 'fov': 40, 'w': 1680, 'h': 950}}).json()
+    'eye': [ctr[0] + 136, ctr[1] + 93, ctr[2] + 153], 'target': ctr, 'fov': 45, 'w': 1280, 'h': 905}}).json()
 print('投影面数:', sum(x.get('painted', 0) for x in r['parts']))
 print('SID=' + sid)
