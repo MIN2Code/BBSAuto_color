@@ -39,9 +39,12 @@ def extract_palette(image_bytes: bytes, k: int = 16, min_ratio: float = 0.006) -
     # 只对前景像素做中位切分
     im2 = Image.fromarray(px.reshape(-1, 1, 3))
     q = im2.quantize(colors=max(2, min(k, 32)), method=Image.Quantize.MEDIANCUT)
-    counts = np.bincount(np.asarray(q).ravel(), minlength=len(q.getpalette()) // 3)
+    labels = np.asarray(q).ravel()
+    counts = np.bincount(labels, minlength=len(q.getpalette()) // 3)
     pal = np.asarray(q.getpalette(), dtype=np.float64).reshape(-1, 3)
     total = float(counts.sum())
+    px_f = px.astype(np.float64)
+    v_arr = px_f.max(axis=1)   # 亮度（去阴影用）
     out = []
     for ci in np.argsort(-counts):
         c = counts[ci]
@@ -50,6 +53,14 @@ def extract_palette(image_bytes: bytes, k: int = 16, min_ratio: float = 0.006) -
         ratio = c / total * float(fg.mean())   # 折算回全图占比
         if ratio < min_ratio:
             break
-        r, g, b = pal[ci]
+        # 簇代表色：取簇内最亮 30% 像素的均值（去渲染阴影——
+        # 同一材质的暗面是光影不是本色）
+        mask = labels == ci
+        if mask.sum() > 8:
+            vv = v_arr[mask]
+            bright = px_f[mask][vv >= np.percentile(vv, 70)]
+            r, g, b = bright.mean(axis=0)
+        else:
+            r, g, b = pal[ci]
         out.append({"hex": f"#{int(r):02X}{int(g):02X}{int(b):02X}", "ratio": round(ratio, 3)})
     return out

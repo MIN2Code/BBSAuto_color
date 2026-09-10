@@ -5,6 +5,7 @@ const state = { sid: null, session: null, sel: -1 };
 
 const viewer = new Viewer($('view'));
 window.__viewer = viewer;   // 调试/自动化可直接操控相机
+window.__state = state;     // 同上：会话状态
 
 function toast(msg, ms = 2600) {
   const t = $('toast');
@@ -171,10 +172,37 @@ $('project').addEventListener('click', async () => {
   const pal = state.session.palette_colors || state.session.palette.map((c) => c.hex);
   const palRGB = pal.map((hx) => [
     parseInt(hx.slice(1, 3), 16), parseInt(hx.slice(3, 5), 16), parseInt(hx.slice(5, 7), 16)]);
+  const palHSV = palRGB.map(rgb2hsv);
+  function rgb2hsv(r, g, b) {   // 0-255 → [h, s, v]
+    r /= 255; g /= 255; b /= 255;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), d = mx - mn;
+    let h = 0;
+    if (d > 0) {
+      if (mx === r) h = ((g - b) / d) % 6;
+      else if (mx === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h /= 6;
+      if (h < 0) h += 1;
+    }
+    return [h, mx ? d / mx : 0, mx];
+  }
 
   // 4) 逐面：质心投影 → 背面剔除 → 深度遮挡 → 采样渲染图 → 最近色板
   const targets = state.sel >= 0 ? [state.sel] : state.session.parts.map((p) => p.index);
   const eye = cam.position;
+  // 件色先验：采样色偏离本件颜色过远 = 对齐错位串色 → 保留件色不涂
+  const baseHSVof = {};
+  for (const p of state.session.parts) {
+    if (p.color) baseHSVof[p.index] = rgb2hsv(
+      parseInt(p.color.slice(1, 3), 16), parseInt(p.color.slice(3, 5), 16), parseInt(p.color.slice(5, 7), 16));
+  }
+  const distHSV = (a, b) => {
+    let dh = Math.abs(a[0] - b[0]);
+    if (dh > 0.5) dh = 1 - dh;
+    const sw = Math.min(a[1], b[1]);
+    return Math.sqrt((dh * 2 * sw * sw) ** 2 + ((a[1] - b[1])) ** 2 + ((a[2] - b[2]) * 0.6) ** 2);
+  };
+  const REJECT_DIST = 0.42;
   const vm = cam.matrixWorldInverse.elements;
   const pm = cam.projectionMatrix.elements;
   const TOL = 0.0025;
@@ -217,13 +245,19 @@ $('project').addEventListener('click', async () => {
       if (px < 0 || px >= w || py < 0 || py >= h) continue;
       const bufZ = depth[(h - 1 - py) * w + px];
       if (fragZ > bufZ + TOL) continue;               // 被更近的几何遮挡
-      // 采样渲染图 → 最近色板（RGB 欧氏）
+      // 采样渲染图 → 最近色板（HSV：色相主导，弱化光影明暗）
       const io = (py * w + px) * 4;
-      const r0 = imgData[io], g0 = imgData[io + 1], b0 = imgData[io + 2];
+      const s0 = rgb2hsv(imgData[io], imgData[io + 1], imgData[io + 2]);
+      const base = baseHSVof[pi];
+      if (base && distHSV(s0, base) > REJECT_DIST) continue;   // 串色防护
       let bi = 0, bd = 1e9;
-      for (let k = 0; k < palRGB.length; k++) {
-        const dr = r0 - palRGB[k][0], dg = g0 - palRGB[k][1], db = b0 - palRGB[k][2];
-        const d = dr * dr + dg * dg + db * db;
+      for (let k = 0; k < palHSV.length; k++) {
+        const ps = palHSV[k];
+        let dh = Math.abs(s0[0] - ps[0]);
+        if (dh > 0.5) dh = 1 - dh;
+        const sw = Math.min(s0[1], ps[1]);           // 低饱和时色相权重退化
+        const d = (dh * 2 * sw * sw) ** 2 + ((s0[1] - ps[1]) * 1.0) ** 2
+                + ((s0[2] - ps[2]) * 0.45) ** 2;
         if (d < bd) { bd = d; bi = k; }
       }
       slots[fi] = bi + 1;
