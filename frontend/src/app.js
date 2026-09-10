@@ -219,8 +219,8 @@ async function projectPaint(imageIndex) {
     const sw = Math.min(a[1], b[1]);
     return Math.sqrt((dh * 2 * sw * sw) ** 2 + ((a[1] - b[1])) ** 2 + ((a[2] - b[2]) * 0.6) ** 2);
   };
-  const REJECT_DIST = 0.42;
   const SAME_TONE = 0.22;     // 新采样与现有色 HSV 距离 < 此值 = 同色系光影差异 → 保留现有
+  // 阴影灰拒绝：低饱和中亮度像素多为渲染图阴影（非本色），跳过该面
   const vm = cam.matrixWorldInverse.elements;
   const pm = cam.projectionMatrix.elements;
   const TOL = 0.0025;
@@ -267,15 +267,24 @@ async function projectPaint(imageIndex) {
       // 采样渲染图 → 最近色板（HSV：色相主导，弱化光影明暗）
       const io = (py * w + px) * 4;
       if (isBgPixel(io)) continue;                   // 背景像素永不采样
-      const s0 = rgb2hsv(imgData[io], imgData[io + 1], imgData[io + 2]);
+      // 3×3 均值采样（抗单像素噪点）
+      let sr = 0, sg = 0, sb = 0;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const o2 = io + (dy * w + dx) * 4;
+        sr += imgData[o2]; sg += imgData[o2 + 1]; sb += imgData[o2 + 2];
+      }
+      sr /= 9; sg /= 9; sb /= 9;
+      const s0raw = rgb2hsv(sr, sg, sb);
+      // 阴影灰拒绝：低饱和中亮灰 = 渲染阴影（非本色），保留该面现值
+      // （收紧：只拦明显中灰；黑材质 v<0.15、暗红等不拦）
+      if (s0raw[1] < 0.15 && s0raw[2] > 0.15 && s0raw[2] < 0.55) continue;
+      const s0 = s0raw;
       // 已涂面：同色系（光影差异）保留现有；不同色系才覆盖
       const oldSlot = old ? old[fi] : 0;
       if (oldSlot) {
         const oh = palHSV[oldSlot - 1];
         if (oh && distHSV(s0, oh) < SAME_TONE) continue;
       }
-      const base = baseHSVof[pi];
-      if (!oldSlot && base && distHSV(s0, base) > REJECT_DIST) continue;   // 未涂面的串色防护
       let bi = 0, bd = 1e9;
       for (let k = 0; k < palHSV.length; k++) {
         const ps = palHSV[k];
@@ -283,7 +292,7 @@ async function projectPaint(imageIndex) {
         if (dh > 0.5) dh = 1 - dh;
         const sw = Math.min(s0[1], ps[1]);           // 低饱和时色相权重退化
         const d = (dh * 2 * sw * sw) ** 2 + ((s0[1] - ps[1]) * 1.0) ** 2
-                + ((s0[2] - ps[2]) * 0.45) ** 2;
+                + ((s0[2] - ps[2]) * 0.35) ** 2;
         if (d < bd) { bd = d; bi = k; }
       }
       slots[fi] = bi + 1;

@@ -51,8 +51,6 @@ def extract_palette(image_bytes: bytes, k: int = 16, min_ratio: float = 0.006) -
         if c <= 0:
             continue
         ratio = c / total * float(fg.mean())   # 折算回全图占比
-        if ratio < min_ratio:
-            break
         # 簇代表色：取簇内最亮 30% 像素的均值（去渲染阴影——
         # 同一材质的暗面是光影不是本色）
         mask = labels == ci
@@ -62,5 +60,11 @@ def extract_palette(image_bytes: bytes, k: int = 16, min_ratio: float = 0.006) -
             r, g, b = bright.mean(axis=0)
         else:
             r, g, b = pal[ci]
+        # 高饱和小簇（蓝色绑带等细节色）适度放宽占比门槛
+        import colorsys
+        hh, ss, vv2 = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        thr = 0.003 if ss > 0.4 else min_ratio
+        if ratio < thr:
+            continue
         out.append({"hex": f"#{int(r):02X}{int(g):02X}{int(b):02X}", "ratio": round(ratio, 3)})
     return out

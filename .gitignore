@@ -3,3 +3,5 @@ server.log
 _*.3mf
 __pycache__/
 *.pyc
+third_party/
+_*.png
