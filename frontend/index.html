@@ -67,6 +67,8 @@ h2 { font-size:13px; margin:0 0 8px; color:var(--accent); text-transform:upperca
       <h2>3 · 导出</h2>
       <div class="row">
         <button class="btn primary" id="export" disabled>导出涂色 3MF</button>
+        <span class="hint">up 轴</span>
+        <select id="upaxis"><option value="x">X</option><option value="y" selected>Y</option><option value="z">Z</option></select>
       </div>
       <p class="hint">多对象 3MF（每件一个对象 + 耗材槽颜色），Bambu/Orca/Snapmaker Orca 直接打开。未配色件落 1 号槽灰色。</p>
     </div>

@@ -20,6 +20,7 @@ def new_session() -> str:
     sid = secrets.token_hex(6)
     with _LOCK:
         SESSIONS[sid] = {"parts": [], "palette": [], "palette_colors": [],
+                         "up_axis": "y",  # STL 无坐标系元数据，合并 bbox 最长轴自动检测
                          "image_name": "", "image_pixels": None, "image_size": None,
                          "created": __import__("time").time()}
         # 会话数控制（自用）
@@ -71,14 +72,36 @@ def part_summary(part: dict, idx: int) -> dict:
     }
 
 
+def detect_up_axis(sess: dict) -> str:
+    """合并 bbox 最长轴 = 高度轴（手办通常高度最大；UI 可手动覆盖）。"""
+    if not sess["parts"]:
+        return sess.get("up_axis", "y")
+    mn = np.full(3, np.inf)
+    mx = np.full(3, -np.inf)
+    for p in sess["parts"]:
+        v = p["vertices"]
+        mn = np.minimum(mn, v.min(axis=0))
+        mx = np.maximum(mx, v.max(axis=0))
+    return ["x", "y", "z"][int(np.argmax(mx - mn))]
+
+
 def session_summary(sid: str) -> dict:
     sess = get_session(sid)
     return {
         "session_id": sid,
         "image_name": sess["image_name"],
         "palette": sess["palette"],
+        "up_axis": sess.get("up_axis", "y"),
         "parts": [part_summary(p, i) for i, p in enumerate(sess["parts"])],
     }
+
+
+def set_up_axis(sid: str, axis: str) -> str:
+    if axis not in ("x", "y", "z"):
+        raise ValueError("axis 必须是 x/y/z")
+    sess = get_session(sid)
+    sess["up_axis"] = axis
+    return axis
 
 
 def set_color(sid: str, part_index: int, color: str) -> None:

@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const state = { sid: null, session: null, sel: -1 };
 
 const viewer = new Viewer($('view'));
+window.__viewer = viewer;   // 调试/自动化可直接操控相机
 
 function toast(msg, ms = 2600) {
   const t = $('toast');
@@ -189,6 +190,14 @@ $('export').addEventListener('click', () => {
   window.location.href = `/api/sessions/${state.sid}/export.3mf`;
 });
 
+$('upaxis').addEventListener('change', async (ev) => {
+  await api(`/api/sessions/${state.sid}/upaxis`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ axis: ev.target.value }),
+  });
+  location.reload();   // 重新按新 up 轴加载
+});
+
 // 启动：?sid=xxx 恢复既有会话（服务重启后用脚本重建会话再引用），
 // 否则新建空会话；加载全部件几何
 const urlSid = new URLSearchParams(location.search).get('sid');
@@ -196,8 +205,21 @@ const init = urlSid ? Promise.resolve(urlSid) : newSession();
 init.then((sid) => { state.sid = sid; return refreshSession(); }).then(async () => {
   $('autoassign').disabled = false;
   $('export').disabled = false;
+  $('upaxis').value = state.session.up_axis || 'y';
+  const palHex = state.session.palette_colors
+    || state.session.palette.map((c) => c.hex);
   for (const p of state.session.parts) {
-    await viewer.loadPart(state.sid, p.index, p.color);
+    await viewer.loadPart(state.sid, p.index, p.color, state.session.up_axis);
+    try {
+      const fc = await fetch(`/api/sessions/${state.sid}/facecolors/${p.index}`).then((x) => x.json());
+      if (fc.slots_b64) {
+        const bin = atob(fc.slots_b64);
+        const slots = new Uint8Array(bin.length);
+        let any = 0;
+        for (let i = 0; i < bin.length; i++) { slots[i] = bin.charCodeAt(i); any += slots[i] ? 1 : 0; }
+        if (any) viewer.setFaceColors(p.index, slots, palHex, p.color);
+      }
+    } catch { /* 无面级颜色忽略 */ }
   }
   viewer.frameAll();
   if (state.session.parts.length) toast(`已加载 ${state.session.parts.length} 件`);

@@ -96,6 +96,16 @@ def session_summary(sid: str):
     return meshpack.session_summary(sid)
 
 
+@router.post("/sessions/{sid}/upaxis")
+async def set_up_axis(sid: str, request: Request):
+    body = await request.json()
+    try:
+        axis = meshpack.set_up_axis(sid, body.get("axis", "y"))
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "up_axis": axis}
+
+
 @router.post("/sessions/{sid}/color/{part_index}")
 async def set_part_color(sid: str, part_index: int, request: Request):
     body = await request.json()
@@ -130,6 +140,17 @@ def geometry(sid: str, part_index: int):
         media_type="application/octet-stream",
         headers={"X-Part-Name": p["name"], "Access-Control-Expose-Headers": "X-Part-Name"},
     )
+
+
+@router.get("/sessions/{sid}/facecolors/{part_index}")
+def get_face_colors(sid: str, part_index: int):
+    sess = meshpack.get_session(sid)
+    if not (0 <= part_index < len(sess["parts"])):
+        raise HTTPException(404, "part not found")
+    slots = sess["parts"][part_index].get("face_slots") or []
+    import base64
+    b = bytes(min(int(x), 255) for x in slots)
+    return {"slots_b64": base64.b64encode(b).decode()}
 
 
 @router.post("/sessions/{sid}/facecolors/{part_index}")

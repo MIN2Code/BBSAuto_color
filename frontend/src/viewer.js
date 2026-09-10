@@ -59,7 +59,7 @@ export class Viewer {
     this.controls.update();
   }
 
-  loadPart(sid, idx, color) {
+  loadPart(sid, idx, color, upAxis = 'y') {
     return fetch(`/api/sessions/${sid}/geometry/${idx}`)
       .then((r) => r.arrayBuffer())
       .then((buf) => {
@@ -68,12 +68,17 @@ export class Viewer {
         const pos = new Float32Array(buf, 8, nv * 3);
         const idxs = new Uint32Array(buf, 8 + nv * 12, nf * 3);
         const geo = new THREE.BufferGeometry();
-        // STL 是 Z-up，three.js Y-up：绕 X 轴 -90°（与 thermal-assess 一致）
+        // STL 无坐标系元数据：按会话检测的 up 轴转到 three.js 的 Y-up
         const rot = new Float32Array(nv * 3);
         for (let i = 0; i < nv; i++) {
-          rot[i * 3] = pos[i * 3];
-          rot[i * 3 + 1] = pos[i * 3 + 2];
-          rot[i * 3 + 2] = -pos[i * 3 + 1];
+          const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
+          if (upAxis === 'z') {          // Z-up：绕 X -90°
+            rot[i * 3] = x; rot[i * 3 + 1] = z; rot[i * 3 + 2] = -y;
+          } else if (upAxis === 'x') {   // X-up：绕 Z +90°
+            rot[i * 3] = -y; rot[i * 3 + 1] = x; rot[i * 3 + 2] = z;
+          } else {                       // Y-up：three.js 原生，恒等
+            rot[i * 3] = x; rot[i * 3 + 1] = y; rot[i * 3 + 2] = z;
+          }
         }
         geo.setAttribute('position', new THREE.BufferAttribute(rot, 3));
         geo.setIndex(new THREE.BufferAttribute(idxs, 1));
