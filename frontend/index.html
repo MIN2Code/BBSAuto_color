@@ -53,6 +53,11 @@ h2 { font-size:13px; margin:0 0 8px; color:var(--accent); text-transform:upperca
         <button class="btn primary" id="autoassign" disabled>自动按件配色</button>
         <span class="hint">按件面积 ↔ 色板占比对位</span>
       </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn" id="alignmode" disabled title="渲染图半透明叠加到视口，旋转模型对齐图中姿态">对齐投影</button>
+        <button class="btn primary" id="project" disabled title="按当前视角把渲染图颜色投影到面向相机的表面">投影上色</button>
+      </div>
+      <p class="hint" id="alignhint" style="display:none">对齐模式：渲染图已叠加（半透明）。旋转/缩放模型使轮廓与图中重合，然后点「投影上色」。可多角度重复。</p>
     </div>
     <div>
       <h2>2 · 件配色 <span class="hint" id="pcount"></span></h2>

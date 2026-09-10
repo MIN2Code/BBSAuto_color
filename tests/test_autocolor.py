@@ -78,28 +78,48 @@ def test_write_project_3mf_structure():
     meshpack.set_color(sid, 0, "#FF3B30")
     meshpack.set_color(sid, 1, "#4CD964")
     sess = meshpack.get_session(sid)
-    data = threemf_out.write_project_3mf(sess["parts"])
+    data = threemf_out.write_project_3mf(sess["parts"], ["#FF3B30", "#4CD964"])
     import zipfile
     z = zipfile.ZipFile(io.BytesIO(data))
     names = z.namelist()
     assert "3D/3dmodel.model" in names
     assert "Metadata/Slic3r_PE_model.config" in names
     assert "Metadata/project_settings.config" in names
-    model = z.read("3D/3dmodel.model").decode()
-    assert model.count("<object id=") == 2, "每件一个对象"
-    assert 'name="part_0.stl"' in model
+    nested = [n for n in names if n.startswith("3D/Objects/")]
+    assert len(nested) == 2, "Bambu 嵌套结构：每件一个 Objects/*.model"
+    main = z.read("3D/3dmodel.model").decode()
+    assert main.count("p:path=") == 2, "主模型引用嵌套对象"
     import json
     cfg = json.loads(z.read("Metadata/project_settings.config"))
     assert set(cfg["filament_colour"]) == {"#FF3B30", "#4CD964"}
     mcfg = z.read("Metadata/Slic3r_PE_model.config").decode()
     assert mcfg.count("<object id=") == 2
     assert 'extruder="1"' in mcfg and 'extruder="2"' in mcfg
+    n0 = z.read(nested[0]).decode()
+    assert "<mesh>" in n0 and "<triangle" in n0
+
+
+def test_face_slots_paint_color():
+    """件内 face_slots → 嵌套 model 的 paint_color 槽位码。"""
+    sid = _new_session_with_parts(1)
+    sess = meshpack.get_session(sid)
+    p = sess["parts"][0]
+    p["color"] = "#FF3B30"
+    p["face_slots"] = [2, 0, 2, 3]   # 槽2/未涂/槽2/槽3
+    data = threemf_out.write_project_3mf(sess["parts"], ["#FF3B30", "#4CD964", "#00C853"])
+    import zipfile
+    z = zipfile.ZipFile(io.BytesIO(data))
+    nested = [n for n in z.namelist() if n.startswith("3D/Objects/")][0]
+    m = z.read(nested).decode()
+    assert 'paint_color="8"' in m, "槽2 槽位码=8"
+    assert 'paint_color="0C"' in m, "槽3 槽位码=0C"
+    assert m.count("<triangle") >= 4
 
 
 def test_unassigned_parts_fall_to_ext1():
     sid = _new_session_with_parts(1)
     sess = meshpack.get_session(sid)
-    data = threemf_out.write_project_3mf(sess["parts"])
+    data = threemf_out.write_project_3mf(sess["parts"], [])
     import zipfile
     z = zipfile.ZipFile(io.BytesIO(data))
     mcfg = z.read("Metadata/Slic3r_PE_model.config").decode()

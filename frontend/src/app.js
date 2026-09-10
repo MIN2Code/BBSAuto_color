@@ -86,9 +86,13 @@ async function uploadImages(files) {
     const j = await api(`/api/sessions/${state.sid}/image`, { method: 'POST', body: fd });
     $('imgname').textContent = j.image_name;
     state.session.palette = j.palette;
+    if (state.imageUrl) URL.revokeObjectURL(state.imageUrl);
+    state.imageUrl = URL.createObjectURL(f);
     renderPalette();
     toast(`「${f.name}」提取到 ${j.palette.length} 个主色`);
   }
+  $('alignmode').disabled = !state.imageUrl;
+  $('project').disabled = !state.imageUrl;
 }
 
 $('imgfile').addEventListener('change', async (ev) => {
@@ -125,6 +129,54 @@ window.addEventListener('drop', (e) => {
 });
 
 // ------------------------------------------------------------ 配色与导出
+// ------------------------------------------------------------ 投影上色（L1）
+$('alignmode').addEventListener('click', () => {
+  state.align = !state.align;
+  let ov = document.getElementById('imgoverlay');
+  if (!ov) {
+    ov = document.createElement('img');
+    ov.id = 'imgoverlay';
+    ov.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;pointer-events:none;opacity:.45;';
+    $('view').appendChild(ov);
+  }
+  ov.src = state.imageUrl || '';
+  ov.style.display = state.align ? 'block' : 'none';
+  $('alignhint').style.display = state.align ? 'block' : 'none';
+  $('alignmode').classList.toggle('primary', state.align);
+});
+
+$('project').addEventListener('click', async () => {
+  if (state.sel < 0 && !state.session.parts.length) return;
+  const body = {
+    camera: {
+      eye: viewer.camera.position.toArray(),
+      target: viewer.controls.target.toArray(),
+      up: viewer.camera.up.toArray(),
+      fov: viewer.camera.fov,
+      w: viewer.container.clientWidth,
+      h: viewer.container.clientHeight,
+    },
+  };
+  if (state.sel >= 0) body.parts = [state.sel];   // 选中件 → 只投影该件；否则全部
+  toast('投影采样中…');
+  const j = await api(`/api/sessions/${state.sid}/project`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const pal = j.palette;
+  let painted = 0;
+  for (const r of j.parts) {
+    if (!r.slots_b64) continue;
+    const bin = atob(r.slots_b64);
+    const slots = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) slots[i] = bin.charCodeAt(i);
+    const p = state.session.parts.find((x) => x.index === r.index);
+    viewer.setFaceColors(r.index, slots, pal, p && p.color);
+    painted += r.painted || 0;
+  }
+  toast(`已投影上色 ${painted.toLocaleString()} 个面（多角度重复可覆盖更多区域）`, 4500);
+});
+
 $('autoassign').addEventListener('click', async () => {
   const j = await api(`/api/sessions/${state.sid}/auto`, { method: 'POST' });
   state.session = j.session;

@@ -19,7 +19,9 @@ SESSIONS: dict[str, dict] = {}
 def new_session() -> str:
     sid = secrets.token_hex(6)
     with _LOCK:
-        SESSIONS[sid] = {"parts": [], "palette": [], "image_name": "", "created": __import__("time").time()}
+        SESSIONS[sid] = {"parts": [], "palette": [], "palette_colors": [],
+                         "image_name": "", "image_pixels": None, "image_size": None,
+                         "created": __import__("time").time()}
         # 会话数控制（自用）
         if len(SESSIONS) > 8:
             oldest = min(SESSIONS, key=lambda k: SESSIONS[k]["created"])
@@ -47,7 +49,8 @@ def add_part(sid: str, name: str, data: bytes) -> dict:
         "name": name,
         "vertices": v,
         "faces": f,
-        "color": "",  # "#RRGGBB"，空=未分配
+        "color": "",       # "#RRGGBB"，空=未分配
+        "face_slots": None,  # 件内投影上色：每面 1-based 槽号列表（None=全件色）
     }
     sess["parts"].append(part)
     return part_summary(part, len(sess["parts"]) - 1)

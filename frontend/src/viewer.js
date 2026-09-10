@@ -8,7 +8,7 @@ export class Viewer {
     this.scene.background = new THREE.Color(0x0b141d);
     const w = container.clientWidth, h = container.clientHeight;
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 5000);
-    this.renderer = new THREE.WebGLRenderer({ antialias: true });
+    this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
     this.renderer.setSize(w, h);
     container.appendChild(this.renderer.domElement);
@@ -93,5 +93,32 @@ export class Viewer {
   setPartColor(idx, color) {
     const m = this.meshes.find((x) => x.userData.partIndex === idx);
     if (m) m.material.color.set(color || '#8a939e');
+  }
+
+  /** 件内逐面上色：slots[i]=槽号（0=未涂→件色），paletteHex 为色板色。 */
+  setFaceColors(idx, slots, paletteHex, partColor) {
+    const m = this.meshes.find((x) => x.userData.partIndex === idx);
+    if (!m) return;
+    const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry;
+    if (m.geometry !== g) { m.geometry.dispose(); m.geometry = g; }
+    const pos = g.getAttribute('position');
+    const col = new Float32Array(pos.count * 3);
+    const base = new THREE.Color(partColor || '#8a939e');
+    for (let fi = 0; fi < slots.length; fi++) {
+      let c = base;
+      if (slots[fi]) {
+        const hex = paletteHex[slots[fi] - 1];
+        if (hex) c = new THREE.Color(hex);
+      }
+      for (let k = 0; k < 3; k++) {
+        col[fi * 9 + k * 3] = c.r;
+        col[fi * 9 + k * 3 + 1] = c.g;
+        col[fi * 9 + k * 3 + 2] = c.b;
+      }
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    g.computeVertexNormals();
+    m.material.vertexColors = true;
+    m.material.needsUpdate = true;
   }
 }
