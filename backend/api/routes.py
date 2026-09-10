@@ -136,7 +136,9 @@ async def upload_image(sid: str, file: UploadFile = File(...)):
     sess["palette"] = merged
     sess["palette_colors"] = [c["hex"] for c in merged]
     sess["image_name"] = (sess["image_name"] + " + " if sess["image_name"] else "") + (file.filename or "render.png")
-    return {"palette": merged, "image_name": sess["image_name"]}
+    img_count = len(sess.get("images") or [])
+    return {"palette": merged, "image_name": sess["image_name"],
+            "image_index": img_count - 1 if img_count else None}
 
 
 @router.get("/sessions/{sid}")

@@ -100,6 +100,69 @@ export class Viewer {
     if (m) m.material.color.set(color || '#8a939e');
   }
 
+  /** 渲染模型剪影：小尺寸 RT，返回 {mask: Uint8Array(64*64), ratio}（1=模型）。 */
+  renderSilhouette(camera, w = 64, h = 64) {
+    const rt = new THREE.WebGLRenderTarget(w, h);
+    const prevRT = this.renderer.getRenderTarget();
+    const prevBg = this.scene.background;
+    const prevOv = this.scene.overrideMaterial;
+    this.scene.background = null;
+    this.scene.overrideMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    this.renderer.setRenderTarget(rt);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    this.renderer.render(this.scene, camera);
+    const px = new Uint8Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, px);
+    this.renderer.setRenderTarget(prevRT);
+    this.scene.overrideMaterial = prevOv;
+    this.scene.background = prevBg;
+    rt.dispose();
+    const mask = new Uint8Array(w * h);
+    let on = 0;
+    for (let i = 0; i < w * h; i++) {
+      // 行序翻转（WebGL 底部起）后写入：mask 按屏幕方向（上起）
+      const row = h - 1 - Math.floor(i / w);
+      const col = i % w;
+      const onPix = px[i * 4] > 32 || px[i * 4 + 1] > 32 || px[i * 4 + 2] > 32;
+      if (onPix) { mask[row * w + col] = 1; on++; }
+    }
+    return { mask, ratio: on / (w * h), w, h };
+  }
+
+  /** 以指定方位角/距离渲染模型剪影（独立临时相机），返回 {mask, ratio}。 */
+  renderSilhouetteAt(azDeg, dist, height, target, w = 64, h = 64) {
+    const cam = new THREE.PerspectiveCamera(45, w / h, 1, 5000);
+    const rad = azDeg * Math.PI / 180;
+    cam.position.set(target.x + Math.sin(rad) * dist, target.y + height, target.z + Math.cos(rad) * dist);
+    cam.lookAt(target.x, target.y, target.z);
+    cam.updateMatrixWorld();
+    const rt = new THREE.WebGLRenderTarget(w, h);
+    const prevRT = this.renderer.getRenderTarget();
+    const prevBg = this.scene.background;
+    const prevOv = this.scene.overrideMaterial;
+    this.scene.background = null;
+    this.scene.overrideMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    this.renderer.setRenderTarget(rt);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    this.renderer.render(this.scene, cam);
+    const px = new Uint8Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, px);
+    this.renderer.setRenderTarget(prevRT);
+    this.scene.overrideMaterial = prevOv;
+    this.scene.background = prevBg;
+    rt.dispose();
+    const mask = new Uint8Array(w * h);
+    let on = 0;
+    for (let i = 0; i < w * h; i++) {
+      const row = h - 1 - Math.floor(i / w);
+      const col = i % w;
+      if (px[i * 4] > 32 || px[i * 4 + 1] > 32 || px[i * 4 + 2] > 32) { mask[row * w + col] = 1; on++; }
+    }
+    return { mask, ratio: on / (w * h), w, h };
+  }
+
   /** 渲染深度缓冲（RGBADepthPacking 解码为 [0,1] NDC 深度；背景≈0.996）。 */
   projectDepthBuffer(camera, w, h) {
     const rt = new THREE.WebGLRenderTarget(w, h);

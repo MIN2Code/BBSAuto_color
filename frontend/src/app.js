@@ -6,6 +6,7 @@ const state = { sid: null, session: null, sel: -1, faceSlots: {}, imageUrl: null
 const viewer = new Viewer($('view'));
 window.__viewer = viewer;   // 调试/自动化可直接操控相机
 window.__state = state;     // 同上：会话状态
+window.__autoAlign = autoAlignCamera;
 
 function toast(msg, ms = 2600) {
   const t = $('toast');
@@ -89,6 +90,7 @@ async function uploadImages(files) {
     $('imgname').textContent = j.image_name;
     state.session.palette = j.palette;
     state.imageUrl = `/api/sessions/${state.sid}/image.png`;
+    state.imageIndex = j.image_index !== undefined ? j.image_index : null;
     renderPalette();
     toast(`「${f.name}」提取到 ${j.palette.length} 个主色`);
   }
@@ -318,7 +320,15 @@ async function projectPaint(imageIndex) {
   toast(`已投影上色 ${paintedTotal.toLocaleString()} 面（遮挡已剔除；多角度重复可覆盖全表面）`, 4500);
 }
 window.__project = projectPaint;
-$('project').addEventListener('click', () => projectPaint());
+$('project').addEventListener('click', async () => {
+  if (state.imageUrl) {
+    try {
+      const al = await window.__autoAlign(state.imageIndex);
+      toast(`自动对齐：方位 ${al.azimuth}° · IoU ${al.iou} · 距离 ${al.distance}`);
+    } catch { /* 对齐失败沿用当前视角 */ }
+  }
+  await projectPaint(state.imageIndex);
+});
 
 $('autoassign').addEventListener('click', async () => {
   const j = await api(`/api/sessions/${state.sid}/auto`, { method: 'POST' });
