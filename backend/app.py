@@ -24,3 +24,11 @@ def calibration_page():
 
 
 app.mount("/static", StaticFiles(directory=_FRONTEND), name="static")
+
+
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    resp = await call_next(request)
+    if request.url.path.startswith("/static/") or request.url.path == "/":
+        resp.headers["Cache-Control"] = "no-cache"
+    return resp

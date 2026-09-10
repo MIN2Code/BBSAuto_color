@@ -79,16 +79,22 @@ function renderPalette() {
 }
 
 // ------------------------------------------------------------ 上传
+async function uploadImages(files) {
+  for (const f of files) {
+    const fd = new FormData();
+    fd.append('file', f);
+    const j = await api(`/api/sessions/${state.sid}/image`, { method: 'POST', body: fd });
+    $('imgname').textContent = j.image_name;
+    state.session.palette = j.palette;
+    renderPalette();
+    toast(`「${f.name}」提取到 ${j.palette.length} 个主色`);
+  }
+}
+
 $('imgfile').addEventListener('change', async (ev) => {
-  const f = ev.target.files[0];
-  if (!f) return;
-  const fd = new FormData();
-  fd.append('file', f);
-  const j = await api(`/api/sessions/${state.sid}/image`, { method: 'POST', body: fd });
-  $('imgname').textContent = j.image_name;
-  state.session.palette = j.palette;
-  renderPalette();
-  toast(`提取到 ${j.palette.length} 个主色`);
+  const files = [...ev.target.files];
+  ev.target.value = '';
+  if (files.length) await uploadImages(files);
 });
 
 async function uploadSTLs(files) {
@@ -106,13 +112,16 @@ async function uploadSTLs(files) {
   toast(`已导入 ${j.added.length} 件`);
 }
 
-// 拖拽 + 按钮
-const view = $('view');
-view.addEventListener('dragover', (e) => e.preventDefault());
-view.addEventListener('drop', (e) => {
+// 全局拖放接管：防止浏览器把拖入的 STL 当下载打开
+window.addEventListener('dragover', (e) => e.preventDefault());
+window.addEventListener('drop', (e) => {
   e.preventDefault();
-  const stls = [...e.dataTransfer.files].filter((f) => /\.stl$/i.test(f.name));
+  const files = [...(e.dataTransfer ? e.dataTransfer.files : [])];
+  if (!files.length) return;
+  const stls = files.filter((f) => /\.stl$/i.test(f.name));
+  const imgs = files.filter((f) => /\.(png|jpe?g|webp)$/i.test(f.name));
   if (stls.length) uploadSTLs(stls);
+  if (imgs.length) uploadImages(imgs);
 });
 
 // ------------------------------------------------------------ 配色与导出
