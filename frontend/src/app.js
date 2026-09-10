@@ -87,8 +87,7 @@ async function uploadImages(files) {
     const j = await api(`/api/sessions/${state.sid}/image`, { method: 'POST', body: fd });
     $('imgname').textContent = j.image_name;
     state.session.palette = j.palette;
-    if (state.imageUrl) URL.revokeObjectURL(state.imageUrl);
-    state.imageUrl = URL.createObjectURL(f);
+    state.imageUrl = `/api/sessions/${state.sid}/image.png`;
     renderPalette();
     toast(`「${f.name}」提取到 ${j.palette.length} 个主色`);
   }
@@ -147,35 +146,106 @@ $('alignmode').addEventListener('click', () => {
 });
 
 $('project').addEventListener('click', async () => {
-  if (state.sel < 0 && !state.session.parts.length) return;
-  const body = {
-    camera: {
-      eye: viewer.camera.position.toArray(),
-      target: viewer.controls.target.toArray(),
-      up: viewer.camera.up.toArray(),
-      fov: viewer.camera.fov,
-      w: viewer.container.clientWidth,
-      h: viewer.container.clientHeight,
-    },
-  };
-  if (state.sel >= 0) body.parts = [state.sel];   // 选中件 → 只投影该件；否则全部
-  toast('投影采样中…');
-  const j = await api(`/api/sessions/${state.sid}/project`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const pal = j.palette;
-  let painted = 0;
-  for (const r of j.parts) {
-    if (!r.slots_b64) continue;
-    const bin = atob(r.slots_b64);
-    const slots = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) slots[i] = bin.charCodeAt(i);
-    const p = state.session.parts.find((x) => x.index === r.index);
-    viewer.setFaceColors(r.index, slots, pal, p && p.color);
-    painted += r.painted || 0;
+  if (!state.session.parts.length) return;
+  const cam = viewer.camera;
+  const w = viewer.container.clientWidth, h = viewer.container.clientHeight;
+  if (!state.imageUrl) { toast('先上传渲染图'); return; }
+  toast('投影采样中（含遮挡测试）…');
+
+  // 1) 渲染图像素（cover 到视口尺寸，与叠加层一致）
+  const img = new Image();
+  img.src = state.imageUrl;
+  await img.decode();
+  const ic = document.createElement('canvas');
+  ic.width = w; ic.height = h;
+  const ictx = ic.getContext('2d', { willReadFrequently: true });
+  const sc = Math.max(w / img.naturalWidth, h / img.naturalHeight);
+  const dw = img.naturalWidth * sc, dh = img.naturalHeight * sc;
+  ictx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  const imgData = ictx.getImageData(0, 0, w, h).data;
+
+  // 2) 当前对齐位姿的深度缓冲（遮挡测试）
+  const depth = viewer.projectDepthBuffer(cam, w, h);
+
+  // 3) 色板
+  const pal = state.session.palette_colors || state.session.palette.map((c) => c.hex);
+  const palRGB = pal.map((hx) => [
+    parseInt(hx.slice(1, 3), 16), parseInt(hx.slice(3, 5), 16), parseInt(hx.slice(5, 7), 16)]);
+
+  // 4) 逐面：质心投影 → 背面剔除 → 深度遮挡 → 采样渲染图 → 最近色板
+  const targets = state.sel >= 0 ? [state.sel] : state.session.parts.map((p) => p.index);
+  const eye = cam.position;
+  const vm = cam.matrixWorldInverse.elements;
+  const pm = cam.projectionMatrix.elements;
+  const TOL = 0.0025;
+  let paintedTotal = 0;
+  for (const pi of targets) {
+    const mesh = viewer.meshes.find((m) => m.userData.partIndex === pi);
+    if (!mesh) continue;
+    let g = mesh.geometry;
+    if (g.index) { g = g.toNonIndexed(); mesh.geometry.dispose(); mesh.geometry = g; }
+    const pos = g.getAttribute('position');
+    const nF = pos.count / 3;
+    const slots = new Uint8Array(nF);
+    for (let fi = 0; fi < nF; fi++) {
+      const o = fi * 9;
+      const ax = pos.array[o], ay = pos.array[o + 1], az = pos.array[o + 2];
+      const bx = pos.array[o + 3], by = pos.array[o + 4], bz = pos.array[o + 5];
+      const cx = pos.array[o + 6], cy = pos.array[o + 7], cz = pos.array[o + 8];
+      // 质心
+      const gx = (ax + bx + cx) / 3, gy = (ay + by + cy) / 3, gz = (az + bz + cz) / 3;
+      // 法向（未归一，符号判断够用）：n · (eye - g) > 0
+      const e1x = bx - ax, e1y = by - ay, e1z = bz - az;
+      const e2x = cx - ax, e2y = cy - ay, e2z = cz - az;
+      const nx = e1y * e2z - e1z * e2y;
+      const ny = e1z * e2x - e1x * e2z;
+      const nz = e1x * e2y - e1y * e2x;
+      if (nx * (eye.x - gx) + ny * (eye.y - gy) + nz * (eye.z - gz) <= 0) continue;
+      // 世界 → 相机空间（three.js：前方为 -Z）
+      const rx = gx - eye.x, ry = gy - eye.y, rz = gz - eye.z;
+      const vx = vm[0] * rx + vm[4] * ry + vm[8] * rz;
+      const vy = vm[1] * rx + vm[5] * ry + vm[9] * rz;
+      const vz = vm[2] * rx + vm[6] * ry + vm[10] * rz + vm[14];
+      if (vz >= -0.1) continue;                       // 相机后方
+      // → 透视 NDC 深度（与 MeshDepthMaterial 打包标度一致）
+      const fragZ = ((pm[10] * vz + pm[14]) / -vz) * 0.5 + 0.5;
+      // → NDC → 像素
+      const ndx = (vx / -vz) / (pm[0]);
+      const ndy = (vy / -vz) / (pm[5]);
+      const px = Math.floor((ndx * 0.5 + 0.5) * w);
+      const py = Math.floor((1 - (ndy * 0.5 + 0.5)) * h);
+      if (px < 0 || px >= w || py < 0 || py >= h) continue;
+      const bufZ = depth[(h - 1 - py) * w + px];
+      if (fragZ > bufZ + TOL) continue;               // 被更近的几何遮挡
+      // 采样渲染图 → 最近色板（RGB 欧氏）
+      const io = (py * w + px) * 4;
+      const r0 = imgData[io], g0 = imgData[io + 1], b0 = imgData[io + 2];
+      let bi = 0, bd = 1e9;
+      for (let k = 0; k < palRGB.length; k++) {
+        const dr = r0 - palRGB[k][0], dg = g0 - palRGB[k][1], db = b0 - palRGB[k][2];
+        const d = dr * dr + dg * dg + db * db;
+        if (d < bd) { bd = d; bi = k; }
+      }
+      slots[fi] = bi + 1;
+    }
+    paintedTotal += [...slots].filter((x) => x).length;
+    viewer.setFaceColors(pi, slots, pal,
+      (state.session.parts.find((p) => p.index === pi) || {}).color);
+    // 存后端（导出用）
+    let b64 = '';
+    for (let i = 0; i < slots.length; i++) b64 += String.fromCharCode(slots[i]);
+    await fetch(`/api/sessions/${state.sid}/facecolors/${pi}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slots_b64: btoa(b64) }),
+    });
   }
-  toast(`已投影上色 ${painted.toLocaleString()} 个面（多角度重复可覆盖更多区域）`, 4500);
+  // 投影完成：自动关闭叠加层，露出模型真实的面级颜色
+  state.align = false;
+  const ov2 = document.getElementById('imgoverlay');
+  if (ov2) ov2.style.display = 'none';
+  $('alignhint').style.display = 'none';
+  $('alignmode').classList.remove('primary');
+  toast(`已投影上色 ${paintedTotal.toLocaleString()} 面（遮挡已剔除；多角度重复可覆盖全表面）`, 4500);
 });
 
 $('autoassign').addEventListener('click', async () => {
@@ -206,6 +276,12 @@ init.then((sid) => { state.sid = sid; return refreshSession(); }).then(async () 
   $('autoassign').disabled = false;
   $('export').disabled = false;
   $('upaxis').value = state.session.up_axis || 'y';
+  if (state.session.has_image) {
+    state.imageUrl = `/api/sessions/${state.sid}/image.png`;
+    $('imgname').textContent = state.session.image_name || '渲染图';
+    $('alignmode').disabled = false;
+    $('project').disabled = false;
+  }
   const palHex = state.session.palette_colors
     || state.session.palette.map((c) => c.hex);
   for (const p of state.session.parts) {

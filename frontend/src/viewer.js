@@ -100,6 +100,38 @@ export class Viewer {
     if (m) m.material.color.set(color || '#8a939e');
   }
 
+  /** 渲染深度缓冲（RGBADepthPacking 解码为 [0,1] NDC 深度；背景≈0.996）。 */
+  projectDepthBuffer(camera, w, h) {
+    const rt = new THREE.WebGLRenderTarget(w, h);
+    rt.depthTexture = new THREE.DepthTexture(w, h);
+    rt.depthTexture.type = THREE.UnsignedIntType;
+    const prevRT = this.renderer.getRenderTarget();
+    const prevBg = this.scene.background;
+    const prevOv = this.scene.overrideMaterial;
+    this.scene.background = null;
+    this.scene.overrideMaterial = new THREE.MeshDepthMaterial({
+      depthPacking: THREE.RGBADepthPacking,
+    });
+    this.renderer.setRenderTarget(rt);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    this.renderer.render(this.scene, camera);
+    const rgba = new Uint8Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, rgba);
+    this.renderer.setRenderTarget(prevRT);
+    this.scene.overrideMaterial = prevOv;
+    this.scene.background = prevBg;
+    rt.dispose();
+    // three.js unpackRGBAToDepth：UnpackFactors = (255/256)/[256^3, 256^2, 256, 1]
+    const depth = new Float32Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      const o = i * 4;
+      depth[i] = rgba[o] * 5.937181e-8 + rgba[o + 1] * 1.519911e-5
+               + rgba[o + 2] * 3.890991e-3 + rgba[o + 3] * 9.960937e-1;
+    }
+    return depth;
+  }
+
   /** 件内逐面上色：slots[i]=槽号（0=未涂→件色），paletteHex 为色板色。 */
   setFaceColors(idx, slots, paletteHex, partColor) {
     const m = this.meshes.find((x) => x.userData.partIndex === idx);
@@ -124,6 +156,7 @@ export class Viewer {
     g.setAttribute('color', new THREE.BufferAttribute(col, 3));
     g.computeVertexNormals();
     m.material.vertexColors = true;
+    m.material.color.set('#ffffff');   // 顶点色与材质色相乘：置白让顶点色独立表达
     m.material.needsUpdate = true;
   }
 }

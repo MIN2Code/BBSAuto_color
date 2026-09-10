@@ -93,7 +93,24 @@ async def upload_image(sid: str, file: UploadFile = File(...)):
 
 @router.get("/sessions/{sid}")
 def session_summary(sid: str):
-    return meshpack.session_summary(sid)
+    s = meshpack.session_summary(sid)
+    sess = meshpack.get_session(sid)
+    s["has_image"] = sess.get("image_pixels") is not None
+    return s
+
+
+@router.get("/sessions/{sid}/image.png")
+def session_image(sid: str):
+    """恢复渲染图（投影采样缓存像素 → PNG）。"""
+    sess = meshpack.get_session(sid)
+    px = sess.get("image_pixels")
+    if px is None:
+        raise HTTPException(404, "无渲染图")
+    from PIL import Image
+    im = Image.fromarray(px)
+    buf = io.BytesIO()
+    im.save(buf, "PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
 
 
 @router.post("/sessions/{sid}/upaxis")
