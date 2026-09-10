@@ -1,0 +1,5 @@
+.venv/
+server.log
+_*.3mf
+__pycache__/
+*.pyc
