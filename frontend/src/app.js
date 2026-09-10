@@ -220,6 +220,7 @@ async function projectPaint(imageIndex) {
     return Math.sqrt((dh * 2 * sw * sw) ** 2 + ((a[1] - b[1])) ** 2 + ((a[2] - b[2]) * 0.6) ** 2);
   };
   const REJECT_DIST = 0.42;
+  const SAME_TONE = 0.22;     // 新采样与现有色 HSV 距离 < 此值 = 同色系光影差异 → 保留现有
   const vm = cam.matrixWorldInverse.elements;
   const pm = cam.projectionMatrix.elements;
   const TOL = 0.0025;
@@ -265,10 +266,16 @@ async function projectPaint(imageIndex) {
       if (fragZ > bufZ + TOL) continue;               // 被更近的几何遮挡
       // 采样渲染图 → 最近色板（HSV：色相主导，弱化光影明暗）
       const io = (py * w + px) * 4;
-      if (isBgPixel(io)) continue;                   // 渲染图背景像素：不采样
+      if (isBgPixel(io)) continue;                   // 背景像素永不采样
       const s0 = rgb2hsv(imgData[io], imgData[io + 1], imgData[io + 2]);
+      // 已涂面：同色系（光影差异）保留现有；不同色系才覆盖
+      const oldSlot = old ? old[fi] : 0;
+      if (oldSlot) {
+        const oh = palHSV[oldSlot - 1];
+        if (oh && distHSV(s0, oh) < SAME_TONE) continue;
+      }
       const base = baseHSVof[pi];
-      if (base && distHSV(s0, base) > REJECT_DIST) continue;   // 串色防护
+      if (!oldSlot && base && distHSV(s0, base) > REJECT_DIST) continue;   // 未涂面的串色防护
       let bi = 0, bd = 1e9;
       for (let k = 0; k < palHSV.length; k++) {
         const ps = palHSV[k];
@@ -280,7 +287,6 @@ async function projectPaint(imageIndex) {
         if (d < bd) { bd = d; bi = k; }
       }
       slots[fi] = bi + 1;
-      if (!slots[fi] && old && old[fi]) slots[fi] = old[fi];   // 累积：新视角没涂的面保留旧色
     }
     paintedTotal += [...slots].filter((x) => x).length;
     state.faceSlots[pi] = slots;
