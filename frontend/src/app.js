@@ -1,7 +1,7 @@
 import { Viewer } from './viewer.js?v=1';
 
 const $ = (id) => document.getElementById(id);
-const state = { sid: null, session: null, sel: -1 };
+const state = { sid: null, session: null, sel: -1, faceSlots: {}, imageUrl: null, align: false };
 
 const viewer = new Viewer($('view'));
 window.__viewer = viewer;   // 调试/自动化可直接操控相机
@@ -215,6 +215,7 @@ $('project').addEventListener('click', async () => {
     const pos = g.getAttribute('position');
     const nF = pos.count / 3;
     const slots = new Uint8Array(nF);
+    const old = state.faceSlots[pi];   // 之前角度的累积成果
     for (let fi = 0; fi < nF; fi++) {
       const o = fi * 9;
       const ax = pos.array[o], ay = pos.array[o + 1], az = pos.array[o + 2];
@@ -261,8 +262,10 @@ $('project').addEventListener('click', async () => {
         if (d < bd) { bd = d; bi = k; }
       }
       slots[fi] = bi + 1;
+      if (!slots[fi] && old && old[fi]) slots[fi] = old[fi];   // 累积：新视角没涂的面保留旧色
     }
     paintedTotal += [...slots].filter((x) => x).length;
+    state.faceSlots[pi] = slots;
     viewer.setFaceColors(pi, slots, pal,
       (state.session.parts.find((p) => p.index === pi) || {}).color);
     // 存后端（导出用）
@@ -327,7 +330,10 @@ init.then((sid) => { state.sid = sid; return refreshSession(); }).then(async () 
         const slots = new Uint8Array(bin.length);
         let any = 0;
         for (let i = 0; i < bin.length; i++) { slots[i] = bin.charCodeAt(i); any += slots[i] ? 1 : 0; }
-        if (any) viewer.setFaceColors(p.index, slots, palHex, p.color);
+        if (any) {
+          state.faceSlots[p.index] = slots;
+          viewer.setFaceColors(p.index, slots, palHex, p.color);
+        }
       }
     } catch { /* 无面级颜色忽略 */ }
   }
