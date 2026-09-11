@@ -8,8 +8,11 @@ export class Viewer {
     this.scene.background = new THREE.Color(0x0b141d);
     const w = container.clientWidth, h = container.clientHeight;
     this.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 5000);
-    this.renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    // 性能优先：关 AA/关保留缓冲（截图改为主动渲染后读），像素比自适应
+    this.renderer = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: false });
+    this._prMax = Math.min(window.devicePixelRatio, 1.5);
+    this._pr = Math.min(window.devicePixelRatio, 1.0);
+    this.renderer.setPixelRatio(this._pr);
     this.renderer.setSize(w, h);
     container.appendChild(this.renderer.domElement);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
@@ -23,6 +26,11 @@ export class Viewer {
     this.scene.add(this.group);
     this.meshes = [];
     window.addEventListener('resize', () => this._resize());
+    this._lastActive = performance.now();
+    this.controls.addEventListener('change', () => this.invalidate());
+    this._frames = 0;
+    this._frameAcc = 0;
+    this._lastFpsT = performance.now();
     this._loop();
   }
 
@@ -35,9 +43,43 @@ export class Viewer {
 
   _loop = () => {
     requestAnimationFrame(() => this._loop());
+    const now = performance.now();
+    const dt = now - (this._prevT || now);
+    this._prevT = now;
     this.controls.update();
-    this.renderer.render(this.scene, this.camera);
+    const active = now - this._lastActive < 2000;
+    if (active || this.needsRender) {
+      this.renderer.render(this.scene, this.camera);
+      this.needsRender = false;
+    }
+    // FPS 自适应像素比：卡则降（至 0.6），流畅则升（至 1.5）
+    this._frames++;
+    this._frameAcc += dt;
+    if (now - this._lastFpsT > 2000 && this._frames > 20) {
+      const avg = this._frameAcc / this._frames;
+      if (avg > 28 && this._pr > 0.6) {
+        this._pr = Math.max(0.6, this._pr - 0.25);
+        this.renderer.setPixelRatio(this._pr);
+        this.invalidate();
+      } else if (avg < 13 && this._pr < this._prMax) {
+        this._pr = Math.min(this._prMax, this._pr + 0.25);
+        this.renderer.setPixelRatio(this._pr);
+        this.invalidate();
+      }
+      this._frames = 0; this._frameAcc = 0; this._lastFpsT = now;
+    }
   };
+
+  invalidate() {
+    this.needsRender = true;
+    this._lastActive = performance.now();
+  }
+
+  /** 主动渲染一帧并返回画布（截图用，无需 preserveDrawingBuffer）。 */
+  renderOnce() {
+    this.renderer.render(this.scene, this.camera);
+    return this.renderer.domElement;
+  }
 
   clear() {
     for (const m of this.meshes) {
@@ -46,6 +88,7 @@ export class Viewer {
       m.material.dispose();
     }
     this.meshes = [];
+    this.invalidate();
   }
 
   /** meta: [{index, color}]；几何异步经 loadPart 追加。 */
@@ -83,14 +126,15 @@ export class Viewer {
         geo.setAttribute('position', new THREE.BufferAttribute(rot, 3));
         geo.setIndex(new THREE.BufferAttribute(idxs, 1));
         geo.computeVertexNormals();
-        const mat = new THREE.MeshStandardMaterial({
+        const mat = new THREE.MeshLambertMaterial({
           color: new THREE.Color(color || '#8a939e'),
-          roughness: 0.85, metalness: 0.0, side: THREE.DoubleSide,
+          side: THREE.DoubleSide,
         });
         const mesh = new THREE.Mesh(geo, mat);
         mesh.userData.partIndex = idx;
         this.group.add(mesh);
         this.meshes.push(mesh);
+        this.invalidate();
         return mesh;
       });
   }
@@ -98,6 +142,7 @@ export class Viewer {
   setPartColor(idx, color) {
     const m = this.meshes.find((x) => x.userData.partIndex === idx);
     if (m) m.material.color.set(color || '#8a939e');
+    this.invalidate();
   }
 
   /** 渲染模型剪影：小尺寸 RT，返回 {mask: Uint8Array(64*64), ratio}（1=模型）。 */
@@ -221,5 +266,6 @@ export class Viewer {
     m.material.vertexColors = true;
     m.material.color.set('#ffffff');   // 顶点色与材质色相乘：置白让顶点色独立表达
     m.material.needsUpdate = true;
+    this.invalidate();
   }
 }
