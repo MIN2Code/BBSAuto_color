@@ -91,6 +91,7 @@ async function uploadImages(files) {
     state.session.palette = j.palette;
     state.imageUrl = `/api/sessions/${state.sid}/image.png`;
     state.imageIndex = j.image_index !== undefined ? j.image_index : null;
+    state.imageAngle[state.imageIndex] = parseFloat(document.getElementById('imgangle').value) || 0;
     renderPalette();
     toast(`「${f.name}」提取到 ${j.palette.length} 个主色`);
   }
@@ -184,7 +185,11 @@ async function autoAlignCamera(imageIndex) {
   const fg = await computeForegroundMask(imageIndex);
   const t = { x: v.controls.target.x, y: v.controls.target.y, z: v.controls.target.z };
   let best = { iou: -1, az: 0, ratio: 0 };
-  for (let azd = 0; azd < 360; azd += 5) {
+  const userAz = (state.imageAngle || {})[imageIndex];
+  const azList = (userAz !== undefined && userAz !== null)
+    ? Array.from({ length: 7 }, (_, i) => userAz + (i - 3) * 5)   // 用户角度 ±15° 精调
+    : Array.from({ length: 72 }, (_, i) => i * 5);                // 全扫描
+  for (const azd of azList) {
     const sil = v.renderSilhouetteAt(azd, 175, 55, t);
     let inter = 0, union = 0;
     for (let i = 0; i < sil.w * sil.h; i++) {

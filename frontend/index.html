@@ -48,6 +48,11 @@ h2 { font-size:13px; margin:0 0 8px; color:var(--accent); text-transform:upperca
         <button class="btn" onclick="document.getElementById('imgfile').click()">上传渲染图</button>
         <span class="hint" id="imgname">未上传</span>
       </div>
+      <div class="row">
+        <span class="hint">该图方位角</span>
+        <input type="number" id="imgangle" step="15" min="-360" max="360" value="0" style="width:70px">
+        <span class="hint">°（0=正前，90=左，180=正后，270=右；看图里角色面向填）</span>
+      </div>
       <div class="palette" id="palette" style="margin-top:8px"><span class="hint">色板将显示在这里</span></div>
       <div class="row" style="margin-top:8px">
         <button class="btn primary" id="autoassign" disabled>自动按件配色</button>
