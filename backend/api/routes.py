@@ -1,6 +1,9 @@
 """AutoColor API：多 STL 组合、渲染图吸色、件级配色、涂色 3MF 导出。"""
 from __future__ import annotations
 
+import json
+import threading
+
 import numpy as np
 import io
 
@@ -18,6 +21,8 @@ router = APIRouter(prefix="/api")
 INFER_PYTHON = os.path.join("J:/claudebox/thermal-assess/.venv/Scripts", "python.exe")
 INFER_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "scripts", "intrinsic_decompose.py")
+SAM_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "scripts", "sam_segment.py")
 
 
 def _sid(request: Request) -> str:
@@ -53,6 +58,45 @@ async def upload_parts(sid: str, files: list[UploadFile] = File(...)):
         except Exception as exc:  # noqa: BLE001
             errors.append(f"{name}: {exc}")
     return {"added": added, "errors": errors, "session": meshpack.session_summary(sid)}
+
+
+def _sam_worker(sess, seg_px, color_px, idx):
+    """后台线程：SAM2 区域分割（分割=渲染图边界清晰，取色=albedo 无光影），
+    完成后写回 session；失败保持 None，前端投影自动回退逐面采样。"""
+    import subprocess as _sp
+    import tempfile as _tf
+    from PIL import Image as PILImage
+    t_seg = t_col = None
+    pre = None
+    try:
+        t_seg = _tf.NamedTemporaryFile(suffix=".seg.png", delete=False)
+        PILImage.fromarray(seg_px).save(t_seg.name)
+        t_seg.close()
+        t_col = _tf.NamedTemporaryFile(suffix=".col.png", delete=False)
+        PILImage.fromarray(color_px).save(t_col.name)
+        t_col.close()
+        pre = t_col.name + ".sam"
+        _sp.run([INFER_PYTHON, SAM_SCRIPT, t_seg.name, pre, t_col.name],
+                check=True, timeout=900, capture_output=True)
+        rpx = np.asarray(PILImage.open(pre + ".labels.png").convert("RGB"), dtype=np.uint8)
+        if rpx.shape[:2] != seg_px.shape[:2]:
+            # 分割输出尺寸与渲染图不一致 → NEAREST 对齐回渲染图坐标系（保 id）
+            rpx = np.asarray(PILImage.fromarray(rpx).resize(
+                (seg_px.shape[1], seg_px.shape[0]), PILImage.NEAREST), dtype=np.uint8)
+        with open(pre + ".regions.json", encoding="utf-8") as f:
+            regions = json.load(f)
+        sess["regionmaps"][idx] = rpx
+        sess["region_data"][idx] = regions
+    except Exception:
+        pass
+    finally:
+        for _p in (t_seg and t_seg.name, t_col and t_col.name,
+                   pre and pre + ".labels.png", pre and pre + ".regions.json"):
+            try:
+                if _p and os.path.exists(_p):
+                    os.remove(_p)
+            except OSError:
+                pass
 
 
 @router.post("/sessions/{sid}/image")
@@ -103,6 +147,17 @@ async def upload_image(sid: str, file: UploadFile = File(...)):
     sess.setdefault("albedos", []).append(albedo_px if albedo_px is not None else px)
     sess["albedo_has_real"] = sess.get("albedo_has_real", [])
     sess["albedo_has_real"].append(albedo_px is not None)
+
+    # SAM2 区域分割：后台异步跑（GPU 被桌面程序共享时耗时波动大，不可阻塞上传）。
+    # 完成前 regionmaps[i] 为 None → 前端投影自动回退逐面采样
+    sess.setdefault("regionmaps", []).append(None)
+    sess.setdefault("region_data", []).append(None)
+    seg_idx = len(sess["images"]) - 1
+    seg_src = px.copy()                                # 分割用渲染图（光影=边界对比）
+    color_src = (albedo_px if albedo_px is not None else px).copy()
+    threading.Thread(target=_sam_worker, args=(sess, seg_src, color_src, seg_idx),
+                     daemon=True).start()
+
     # 色板从 albedo（本色图）提取——比原图更准（无光影污染）
     albedos = sess.get("albedos") or []
     pal_src = albedos[-1] if albedos else None
@@ -138,7 +193,8 @@ async def upload_image(sid: str, file: UploadFile = File(...)):
     sess["image_name"] = (sess["image_name"] + " + " if sess["image_name"] else "") + (file.filename or "render.png")
     img_count = len(sess.get("images") or [])
     return {"palette": merged, "image_name": sess["image_name"],
-            "image_index": img_count - 1 if img_count else None}
+            "image_index": img_count - 1 if img_count else None,
+            "region_pending": True}
 
 
 @router.get("/sessions/{sid}")
@@ -162,6 +218,31 @@ def session_image(sid: str, i: int = -1):
     buf = io.BytesIO()
     im.save(buf, "PNG")
     return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@router.get("/sessions/{sid}/regionmap.png")
+def session_regionmap(sid: str, i: int = -1):
+    """SAM2 区域标签图（R=id低8位 G=id高8位 B=255边界；id 0=背景）。"""
+    sess = meshpack.get_session(sid)
+    maps = sess.get("regionmaps") or []
+    ii = i if i >= 0 else len(maps) - 1
+    if not maps or not (0 <= ii < len(maps)) or maps[ii] is None:
+        raise HTTPException(404, "该图无区域分割结果")
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.fromarray(maps[ii]).save(buf, "PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@router.get("/sessions/{sid}/regions")
+def session_regions(sid: str, i: int = -1):
+    """区域中位色列表（与 regionmap.png 的 id 对应；分割未完成时 404）。"""
+    sess = meshpack.get_session(sid)
+    data = sess.get("region_data") or []
+    ii = i if i >= 0 else len(data) - 1
+    if not data or not (0 <= ii < len(data)) or data[ii] is None:
+        raise HTTPException(404, "无区域数据")
+    return {"image_index": ii, "regions": data[ii]}
 
 
 @router.post("/sessions/{sid}/upaxis")

@@ -94,9 +94,22 @@ async function uploadImages(files) {
     state.imageAngle[state.imageIndex] = parseFloat(document.getElementById('imgangle').value) || 0;
     renderPalette();
     toast(`「${f.name}」提取到 ${j.palette.length} 个主色`);
+    if (j.region_pending) pollRegionReady(state.imageIndex);
   }
   $('alignmode').disabled = !state.imageUrl;
   $('project').disabled = !state.imageUrl;
+}
+
+// SAM2 后台分割完成提示：投影将自动切到区域模式（更稳的色块+更全的细节）
+function pollRegionReady(idx, tried = 0) {
+  if (tried > 120 || idx === null || idx === undefined) return;   // 最多等 10 分钟
+  setTimeout(async () => {
+    try {
+      const r = await fetch(`/api/sessions/${state.sid}/regions?i=${idx}`);
+      if (r.ok) { toast('✓ 区域分割完成，投影上色将使用区域模式', 4000); return; }
+    } catch { /* 继续 */ }
+    pollRegionReady(idx, tried + 1);
+  }, 5000);
 }
 
 $('imgfile').addEventListener('change', async (ev) => {
@@ -232,6 +245,7 @@ async function projectPaint(imageIndex) {
   ictx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh);
   const imgData = ictx.getImageData(0, 0, w, h).data;
   // 背景色估计（渲染图四角中值）：投影时跳过背景像素（不涂，保留既有色）
+  // 背景色估计（渲染图四角中值）：投影时跳过背景像素（不涂，保留既有色）
   const corners = [];
   for (const [y0, x0] of [[0, 0], [0, w - 9], [h - 9, 0], [h - 9, w - 9]]) {
     for (let y = y0; y < y0 + 9; y += 4) for (let x = x0; x < x0 + 9; x += 4) {
@@ -284,6 +298,47 @@ async function projectPaint(imageIndex) {
     return Math.sqrt((dh * 2 * sw * sw) ** 2 + ((a[1] - b[1])) ** 2 + ((a[2] - b[2]) * 0.6) ** 2);
   };
   const SAME_TONE = 0.22;     // 新采样与现有色 HSV 距离 < 此值 = 同色系光影差异 → 保留现有
+
+  // 3.5) SAM2 区域分割数据（该图有分割结果则走区域查表：区域中位色稳定，
+  //      抗渐变/抗锯齿；无结果则回退旧逐面最近色板路径）
+  let regMap = null, regionSlot = null;
+  try {
+    const ridx = imageIndex === undefined ? -1 : imageIndex;
+    const [rmR, rgR] = await Promise.all([
+      fetch(`/api/sessions/${state.sid}/regionmap.png?i=${ridx}`),
+      fetch(`/api/sessions/${state.sid}/regions?i=${ridx}`),
+    ]);
+    if (rmR.ok && rgR.ok) {
+      const rimg = new Image();
+      rimg.src = URL.createObjectURL(await rmR.blob());
+      await rimg.decode();
+      const rc = document.createElement('canvas');
+      rc.width = rimg.naturalWidth; rc.height = rimg.naturalHeight;
+      const rctx = rc.getContext('2d', { willReadFrequently: true });
+      rctx.imageSmoothingEnabled = false;   // id 不能被插值污染
+      rctx.drawImage(rimg, 0, 0);
+      regMap = { data: rctx.getImageData(0, 0, rc.width, rc.height).data, w: rc.width, h: rc.height };
+      const regions = (await rgR.json()).regions;
+      // 区域中位色 → 最近色板槽号（HSV 量化，与逐面路径同公式）
+      regionSlot = new Uint8Array(65536);
+      for (const r of regions) {
+        const hv = rgb2hsv(parseInt(r.hex.slice(1, 3), 16),
+          parseInt(r.hex.slice(3, 5), 16), parseInt(r.hex.slice(5, 7), 16));
+        let bi = 0, bd = 1e9;
+        for (let k = 0; k < palHSV.length; k++) {
+          const ps = palHSV[k];
+          let dh = Math.abs(hv[0] - ps[0]);
+          if (dh > 0.5) dh = 1 - dh;
+          const sw = Math.min(hv[1], ps[1]);
+          const d = (dh * 2 * sw * sw) ** 2 + ((hv[1] - ps[1]) * 1.0) ** 2
+                  + ((hv[2] - ps[2]) * 0.35) ** 2;
+          if (d < bd) { bd = d; bi = k; }
+        }
+        regionSlot[r.id] = bi + 1;
+      }
+    }
+  } catch { /* 区域数据不可用 → 回退逐面采样 */ }
+
   // 阴影灰拒绝：低饱和中亮度像素多为渲染图阴影（非本色），跳过该面
   const vm = cam.matrixWorldInverse.elements;
   const pm = cam.projectionMatrix.elements;
@@ -328,7 +383,32 @@ async function projectPaint(imageIndex) {
       if (px < 0 || px >= w || py < 0 || py >= h) continue;
       const bufZ = depth[(h - 1 - py) * w + px];
       if (fragZ > bufZ + TOL) continue;               // 被更近的几何遮挡
-      // 采样渲染图 → 最近色板（HSV：色相主导，弱化光影明暗）
+      const oldSlot = old ? old[fi] : 0;
+      if (regionSlot) {
+        // 区域查表路径：视口 → 渲染图原始坐标（逆 cover）→ 区域 id → 色板槽。
+        // 命中区域 → 区域色（稳定，抗渐变/抗锯齿）；背景 → 不涂；
+        // 边界/未知区域 → 落回下方逐面采样兜底
+        const ix = Math.floor((px - (w - dw) / 2) / sc);
+        const iy = Math.floor((py - (h - dh) / 2) / sc);
+        if (ix >= 0 && iy >= 0 && ix < regMap.w && iy < regMap.h) {
+          const ro = (iy * regMap.w + ix) * 4;
+          const rid = regMap.data[ro] + regMap.data[ro + 1] * 256;
+          if (!rid) continue;                         // 背景：永不采样
+          if (regMap.data[ro + 2] !== 255) {
+            const ns = regionSlot[rid];
+            if (ns) {
+              // 已涂面：同色系（光影差异）保留现有，不同色系才覆盖
+              if (oldSlot) {
+                const oh = palHSV[oldSlot - 1], nh = palHSV[ns - 1];
+                if (oh && nh && distHSV(oh, nh) < SAME_TONE) continue;
+              }
+              slots[fi] = ns;
+              continue;
+            }
+          }
+        }
+      }
+      // 逐面采样渲染图 → 最近色板（HSV：色相主导，弱化光影明暗）
       const io = (py * w + px) * 4;
       if (isBgPixel(io)) continue;                   // 背景像素永不采样
       // 3×3 均值采样（抗单像素噪点）
@@ -344,7 +424,6 @@ async function projectPaint(imageIndex) {
       if (s0raw[1] < 0.15 && s0raw[2] > 0.15 && s0raw[2] < 0.55) continue;
       const s0 = s0raw;
       // 已涂面：同色系（光影差异）保留现有；不同色系才覆盖
-      const oldSlot = old ? old[fi] : 0;
       if (oldSlot) {
         const oh = palHSV[oldSlot - 1];
         if (oh && distHSV(s0, oh) < SAME_TONE) continue;
@@ -379,7 +458,9 @@ async function projectPaint(imageIndex) {
   if (ov2) ov2.style.display = 'none';
   $('alignhint').style.display = 'none';
   $('alignmode').classList.remove('primary');
-  toast(`已投影上色 ${paintedTotal.toLocaleString()} 面（遮挡已剔除；多角度重复可覆盖全表面）`, 4500);
+  toast(regionSlot
+    ? `已投影上色 ${paintedTotal.toLocaleString()} 面（SAM2 区域模式 + 遮挡剔除）`
+    : `已投影上色 ${paintedTotal.toLocaleString()} 面（逐面采样模式；多角度重复可覆盖全表面）`, 4500);
 }
 window.__project = projectPaint;
 $('project').addEventListener('click', async () => {

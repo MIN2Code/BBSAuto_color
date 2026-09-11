@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 third_party/
 _*.png
+_test_sam*
+_rossi01_albedo.png
+_research/
