@@ -14,10 +14,12 @@ import numpy as np
 
 
 def hygiene_mask(img: np.ndarray) -> np.ndarray:
-    """L0 卫生层：返回 bool 掩码，True=可信像素。"""
+    """L0 卫生层：返回 bool 掩码，True=可信像素。
+    过曝像素不剔除（白件/亮部大片 ≥250，剔除会让件色系统性偏暗）——
+    后续钳制到 250 参与统计，孤立镜面亮峰由截尾中位排除。
+    只剔欠曝死黑与边框带。"""
     h, w = img.shape[:2]
     m = np.ones((h, w), dtype=bool)
-    m[img.max(axis=2) >= 250] = False          # 过曝/镜面高光
     m[img.min(axis=2) <= 4] = False            # 欠曝死黑
     bw = max(3, round(min(h, w) * 0.03))       # 白框/边框带（渲染图装饰边）
     m[:bw, :] = False
@@ -96,6 +98,18 @@ def trimmed_median(lab_px: np.ndarray) -> np.ndarray:
     return np.median(lab_px[keep], axis=0) if keep.any() else med
 
 
+def weighted_median(labs: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """逐通道加权中位：权重=该视角的可信像素数（大可见区视角更可信）。"""
+    order = np.argsort(labs, axis=0)
+    out = np.zeros(labs.shape[1])
+    half = weights.sum() / 2.0
+    for ch in range(labs.shape[1]):
+        cum = np.cumsum(weights[order[:, ch]])
+        idx = int(np.searchsorted(cum, half))
+        out[ch] = labs[order[idx, ch], ch]
+    return out
+
+
 MIN_PIX = 40          # 全部视角可信像素低于此 → 旗帜（不可瞎猜）
 PIX_FULL = 400        # 像素数置信度满分阈值
 DISAGREE_DE = 6.0     # 视角间件色 ΔE 标准差超此 → 旗帜
@@ -119,7 +133,7 @@ def recolor_session(sess: dict) -> list:
             idb = np.asarray(PILImage.fromarray(idb).resize(
                 (img.shape[1], img.shape[0]), PILImage.NEAREST), dtype=np.uint8)
         fg = idb[..., 2] > 200                    # ID 编码 B=255 仅模型像素
-        imgc = white_balance(img, fg)
+        imgc = np.minimum(white_balance(img, fg), 250.0)   # 过曝钳制（亮部参与统计）
         ids = idb[..., 0].astype(np.int64) + idb[..., 1].astype(np.int64) * 256
         views.append((imgc, ids, hygiene_mask(img)))
 
@@ -151,7 +165,14 @@ def recolor_session(sess: dict) -> list:
         else:
             pix_total = sum(x[1] for x in pv)
             labs = np.stack([x[0] for x in pv])
-            med = np.median(labs, axis=0)
+            wts = np.array([x[1] for x in pv], dtype=np.float64)
+            # 取亮视角：同灯转台图同件跨视角明暗差大（受光面/背光面），
+            # 人眼认知的"件色"是受光面色——按 L 降序取前 60% 视角加权中位
+            keep = max(2, int(np.ceil(len(pv) * 0.6)))
+            bright = np.argsort(-labs[:, 0])[:keep]
+            labs_k = labs[bright]
+            wts_k = wts[bright]
+            med = weighted_median(labs_k, wts_k)
             dE = np.sqrt(((labs - med) ** 2).sum(axis=1))
             pix_factor = min(1.0, pix_total / PIX_FULL)
             agree = max(0.0, 1.0 - float(dE.std()) / DISAGREE_DE)

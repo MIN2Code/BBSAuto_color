@@ -175,12 +175,27 @@ export class Viewer {
     return { mask, ratio: on / (w * h), w, h };
   }
 
-  /** 以指定方位角/距离/FOV 渲染模型剪影（独立临时相机），返回 {mask, ratio}。 */
-  renderSilhouetteAt(azDeg, dist, height, target, w = 64, h = 64, fov = 45) {
+  /** 以指定方位角/距离/FOV 渲染模型剪影（独立临时相机），dx/dy 为构图偏移
+   * （64 格坐标，模拟作者后期裁剪导致的模型不居中），返回 {mask, ratio}。 */
+  renderSilhouetteAt(azDeg, dist, height, target, w = 64, h = 64, fov = 45, dx = 0, dy = 0) {
     const cam = new THREE.PerspectiveCamera(fov, w / h, 1, 5000);
     const rad = azDeg * Math.PI / 180;
-    cam.position.set(target.x + Math.sin(rad) * dist, target.y + height, target.z + Math.cos(rad) * dist);
-    cam.lookAt(target.x, target.y, target.z);
+    const pos = new THREE.Vector3(
+      target.x + Math.sin(rad) * dist,
+      target.y + height,
+      target.z + Math.cos(rad) * dist);
+    const look = new THREE.Vector3(target.x, target.y, target.z);
+    if (dx || dy) {
+      const fwd = look.clone().sub(pos).normalize();
+      const up0 = new THREE.Vector3(0, 1, 0);
+      const right = new THREE.Vector3().crossVectors(fwd, up0).normalize();
+      const up2 = new THREE.Vector3().crossVectors(right, fwd).normalize();
+      const worldPerPx = 2 * dist * Math.tan(fov * Math.PI / 360) / h;
+      look.add(right.multiplyScalar(dx * worldPerPx));
+      look.add(up2.multiplyScalar(-dy * worldPerPx));
+    }
+    cam.position.copy(pos);
+    cam.lookAt(look);
     cam.updateMatrixWorld();
     const rt = new THREE.WebGLRenderTarget(w, h);
     const prevRT = this.renderer.getRenderTarget();

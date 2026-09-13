@@ -264,8 +264,8 @@ async function fitTurntable(nViews) {
     height = Math.max(20, size.y * 0.25);                    // 略俯视（转台相机高度）
   }
   const az = new Array(nViews).fill(0);
-  const scoreOne = (i, a, d, h, f) => {
-    const s = v.renderSilhouetteAt(a, d, h, t, 64, 64, f);
+  const scoreOne = (i, a, d, h, f, sx = 0, sy = 0) => {
+    const s = v.renderSilhouetteAt(a, d, h, t, 64, 64, f, sx, sy);
     let inter = 0, union = 0;
     for (let k = 0; k < s.mask.length; k++) {
       const x = fgs[i].mask[k], y = s.mask[k];
@@ -319,26 +319,57 @@ async function fitTurntable(nViews) {
     }
   };
   const bestAzS = az.map((a, i) => scoreOne(i, a, dist, height, fov));
-  for (const [rD, rH] of [[15, 8], [8, 4], [4, 2], [2, 1]]) {
+  // 3) 每视角构图偏移（dx/dy，64 格坐标）：作者后期裁剪致模型不居中
+  const dx = new Array(nViews).fill(0), dy = new Array(nViews).fill(0);
+  const descendShift = (i, key, delta) => {
+    const cur = scoreOne(i, az[i], dist, height, fov, dx[i], dy[i]);
+    for (const dir of [1, -1]) {
+      const nx = key === 'x' ? dx[i] + dir * delta : dx[i];
+      const ny = key === 'y' ? dy[i] + dir * delta : dy[i];
+      if (Math.abs(nx) > 25 || Math.abs(ny) > 25) continue;
+      if (scoreOne(i, az[i], dist, height, fov, nx, ny) > cur) {
+        dx[i] = nx; dy[i] = ny;
+        return true;
+      }
+    }
+    return false;
+  };
+  for (const [rD, rH, rS] of [[15, 8, 10], [8, 4, 5], [4, 2, 2], [2, 1, 1]]) {
     for (let g = 0; g < 4; g++) {
       let moved = false;
       moved = descendGlobal('dist', rD) || moved;
       moved = descendGlobal('height', rH) || moved;
+      for (let i = 0; i < nViews; i++) {
+        moved = descendShift(i, 'x', rS) || moved;
+        moved = descendShift(i, 'y', rS) || moved;
+      }
       for (let i = 0; i < nViews; i++) descendAz(i);
       if (!moved) break;
     }
   }
-  return { az, dist, height, fov, target: t, iou: Number(scoreAll().toFixed(3)) };
+  return { az, dist, height, fov, target: t, dx, dy, iou: Number(scoreAll().toFixed(3)) };
 }
 
 function turntableCamera(pose, i) {
   const cam = new THREE.PerspectiveCamera(pose.fov, 1, 1, 5000);
   const rad = pose.az[i] * Math.PI / 180;
-  cam.position.set(
+  const pos = new THREE.Vector3(
     pose.target.x + Math.sin(rad) * pose.dist,
     pose.target.y + pose.height,
     pose.target.z + Math.cos(rad) * pose.dist);
-  cam.lookAt(pose.target.x, pose.target.y, pose.target.z);
+  const look = new THREE.Vector3(pose.target.x, pose.target.y, pose.target.z);
+  const sx = (pose.dx && pose.dx[i]) || 0, sy = (pose.dy && pose.dy[i]) || 0;
+  if (sx || sy) {
+    const fwd = look.clone().sub(pos).normalize();
+    const up0 = new THREE.Vector3(0, 1, 0);
+    const right = new THREE.Vector3().crossVectors(fwd, up0).normalize();
+    const up2 = new THREE.Vector3().crossVectors(right, fwd).normalize();
+    const worldPerPx = 2 * pose.dist * Math.tan(pose.fov * Math.PI / 360) / 64;
+    look.add(right.multiplyScalar(sx * worldPerPx));
+    look.add(up2.multiplyScalar(-sy * worldPerPx));
+  }
+  cam.position.copy(pos);
+  cam.lookAt(look);
   cam.updateMatrixWorld();
   return cam;
 }
