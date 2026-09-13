@@ -175,9 +175,9 @@ export class Viewer {
     return { mask, ratio: on / (w * h), w, h };
   }
 
-  /** 以指定方位角/距离渲染模型剪影（独立临时相机），返回 {mask, ratio}。 */
-  renderSilhouetteAt(azDeg, dist, height, target, w = 64, h = 64) {
-    const cam = new THREE.PerspectiveCamera(45, w / h, 1, 5000);
+  /** 以指定方位角/距离/FOV 渲染模型剪影（独立临时相机），返回 {mask, ratio}。 */
+  renderSilhouetteAt(azDeg, dist, height, target, w = 64, h = 64, fov = 45) {
+    const cam = new THREE.PerspectiveCamera(fov, w / h, 1, 5000);
     const rad = azDeg * Math.PI / 180;
     cam.position.set(target.x + Math.sin(rad) * dist, target.y + height, target.z + Math.cos(rad) * dist);
     cam.lookAt(target.x, target.y, target.z);
@@ -188,6 +188,9 @@ export class Viewer {
     const prevOv = this.scene.overrideMaterial;
     this.scene.background = null;
     this.scene.overrideMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    for (const obj of this.scene.children) {   // 网格线不进剪影
+      if (obj.isGridHelper || obj.isLine || obj.isLineSegments) obj.userData._silHidden = obj.visible, obj.visible = false;
+    }
     this.renderer.setRenderTarget(rt);
     this.renderer.setClearColor(0x000000, 1);
     this.renderer.clear();
@@ -197,6 +200,12 @@ export class Viewer {
     this.renderer.setRenderTarget(prevRT);
     this.scene.overrideMaterial = prevOv;
     this.scene.background = prevBg;
+    for (const obj of this.scene.children) {
+      if (obj.userData && obj.userData._silHidden !== undefined) {
+        obj.visible = obj.userData._silHidden;
+        delete obj.userData._silHidden;
+      }
+    }
     rt.dispose();
     const mask = new Uint8Array(w * h);
     let on = 0;
@@ -207,6 +216,61 @@ export class Viewer {
     }
     return { mask, ratio: on / (w * h), w, h };
   }
+
+  /**
+   * 件 ID 缓冲：每件唯一颜色（R=partIndex低8位, G=高8位, B=255）渲染一次读回。
+   * 行序已翻转为上起（与渲染图 PNG 一致）。AA 已全局关闭，边缘无混色。
+   * NoColorSpace 直写编码，避免 sRGB 变换吃掉小编码值。
+   */
+  renderIdBuffer(camera, w, h) {
+    const rt = new THREE.WebGLRenderTarget(w, h);
+    const prevRT = this.renderer.getRenderTarget();
+    const prevBg = this.scene.background;
+    this.scene.background = null;
+    for (const obj of this.scene.children) {
+      if (obj.isGridHelper || obj.isLine || obj.isLineSegments) obj.userData._idHidden = obj.visible, obj.visible = false;
+    }
+    const prevMats = [];
+    const tempMats = [];
+    for (const m of this.meshes) {
+      prevMats.push([m, m.material]);
+      const id = (m.userData.partIndex || 0) + 1;
+      const mat = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+      // 直接赋线性分量（绕过 ColorManagement）——setRGB 带 colorSpace 在 r160
+      // 会做 sRGB→linear 转换，小编码值塌缩导致 ID 混叠
+      mat.color.r = (id & 255) / 255;
+      mat.color.g = ((id >> 8) & 255) / 255;
+      mat.color.b = 1;
+      tempMats.push(mat);
+      m.material = mat;
+    }
+    this.renderer.setRenderTarget(rt);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    this.renderer.render(this.scene, camera);
+    const px = new Uint8Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(rt, 0, 0, w, h, px);
+    this.renderer.setRenderTarget(prevRT);
+    this.scene.background = prevBg;
+    for (const [m, mat] of prevMats) m.material = mat;
+    for (const mat of tempMats) mat.dispose();
+    for (const obj of this.scene.children) {
+      if (obj.userData && obj.userData._idHidden !== undefined) {
+        obj.visible = obj.userData._idHidden;
+        delete obj.userData._idHidden;
+      }
+    }
+    rt.dispose();
+    const data = new Uint8Array(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const row = h - 1 - Math.floor(i / w);
+      const col = i % w;
+      const o = (row * w + col) * 4, s = i * 4;
+      data[o] = px[s]; data[o + 1] = px[s + 1]; data[o + 2] = px[s + 2]; data[o + 3] = 255;
+    }
+    return { data, w, h };
+  }
+
 
   /** 渲染深度缓冲（RGBADepthPacking 解码为 [0,1] NDC 深度；背景≈0.996）。 */
   projectDepthBuffer(camera, w, h) {

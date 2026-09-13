@@ -65,19 +65,20 @@ def _mesh_xml(part: dict) -> str:
     return "\n".join(res)
 
 
-def write_project_3mf(parts: list[dict], palette_colors: list[str]) -> bytes:
+def write_project_3mf(parts: list[dict], palette_colors: list[str] | None = None) -> bytes:
     """parts: [{name, vertices, faces, color('#RRGGBB'), face_slots?}]
 
-    palette_colors: 色板色列表（投影上色的槽位来源，槽 1..K）。
-    颜色模型：filament_colour = 件色 ∪ 色板色（去重，槽 1..K）；
-    件 color → 该件基础 extruder；face_slots（1-based 槽号）→ 逐面 paint_color。
+    连续 RGB 输出（一期默认）：filament_colour = 件色去重列表（每件基础 extruder），
+    实际耗材映射由用户在切片软件中自行设置。palette_colors 仅在显式传入时
+    并入耗材表（可选"吸附到已有色板"，默认关）。face_slots（1-based 槽号）为
+    二期件内子件预留：有则逐面写 paint_color。
     """
     colors: list[str] = []
     for p in parts:
         c = (p.get("color") or "").upper()
         if c and c not in colors:
             colors.append(c)
-    for c in (c.upper() for c in palette_colors):
+    for c in (c.upper() for c in (palette_colors or [])):
         if c not in colors:
             colors.append(c)
     if not colors:

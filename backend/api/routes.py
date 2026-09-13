@@ -14,6 +14,7 @@ from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 
 from .. import meshpack, palette as palette_mod, threemf_out
+from .. import colorize
 
 router = APIRouter(prefix="/api")
 
@@ -202,6 +203,7 @@ def session_summary(sid: str):
     s = meshpack.session_summary(sid)
     sess = meshpack.get_session(sid)
     s["has_image"] = sess.get("image_pixels") is not None
+    s["image_count"] = len(sess.get("images") or [])
     return s
 
 
@@ -245,6 +247,54 @@ def session_regions(sid: str, i: int = -1):
     return {"image_index": ii, "regions": data[ii]}
 
 
+@router.post("/sessions/{sid}/idbuf")
+async def upload_idbuf(sid: str, i: int = -1, file: UploadFile = File(...)):
+    """上传某视角的件 ID 缓冲 PNG（R=partIndex低8位 G=高8位 B=255 仅模型像素）。"""
+    import numpy as np
+    from PIL import Image as PILImage
+    data = await file.read()
+    sess = meshpack.get_session(sid)
+    idb = np.asarray(PILImage.open(io.BytesIO(data)).convert("RGB"), dtype=np.uint8)
+    sess.setdefault("idbufs", [])
+    idx = i if i >= 0 else len(sess["images"]) - 1
+    while len(sess["idbufs"]) < idx + 1:
+        sess["idbufs"].append(None)
+    sess["idbufs"][idx] = idb
+    return {"ok": True, "index": idx, "size": [idb.shape[1], idb.shape[0]]}
+
+
+@router.get("/sessions/{sid}/idbuf.png")
+def session_idbuf(sid: str, i: int = -1):
+    """诊断：查看某视角的件 ID 缓冲（对齐调试用）。"""
+    sess = meshpack.get_session(sid)
+    idbufs = sess.get("idbufs") or []
+    ii = i if i >= 0 else len(idbufs) - 1
+    if not idbufs or not (0 <= ii < len(idbufs)) or idbufs[ii] is None:
+        raise HTTPException(404, "无 ID 缓冲")
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.fromarray(idbufs[ii]).save(buf, "PNG")
+    return Response(content=buf.getvalue(), media_type="image/png")
+
+
+@router.post("/sessions/{sid}/autocolor")
+def autocolor(sid: str):
+    """一期件级取色：L0 卫生层 + 白平衡 + 腐蚀 + 截尾中位 + 跨视角中位 + 置信度/旗帜。"""
+    sess = meshpack.get_session(sid)
+    if not sess.get("idbufs") or all(b is None for b in sess["idbufs"]):
+        raise HTTPException(409, "无件 ID 缓冲（先在前端完成转台拟合与采集）")
+    results = colorize.recolor_session(sess)
+    # 取色结果写回件色（override 已在 colorize 内最后生效）
+    for item in results:
+        pi = item["index"]
+        if 0 <= pi < len(sess["parts"]) and item.get("hex"):
+            meshpack.set_color(sid, pi, item["hex"])
+            sess["parts"][pi]["conf"] = item.get("conf")
+            sess["parts"][pi]["flagged"] = item.get("flagged", False)
+            sess["parts"][pi]["reason"] = item.get("reason", "")
+    return {"parts": results}
+
+
 @router.post("/sessions/{sid}/upaxis")
 async def set_up_axis(sid: str, request: Request):
     body = await request.json()
@@ -263,7 +313,10 @@ async def set_part_color(sid: str, part_index: int, request: Request):
         meshpack.set_color(sid, part_index, color)
     except (IndexError, ValueError) as exc:
         raise HTTPException(400, str(exc)) from exc
-    return {"ok": True, "color": meshpack.get_session(sid)["parts"][part_index]["color"]}
+    # 人工改色 = override 持久层：重跑自动取色不冲掉
+    sess = meshpack.get_session(sid)
+    sess.setdefault("overrides", {})[str(part_index)] = color
+    return {"ok": True, "color": sess["parts"][part_index]["color"]}
 
 
 @router.post("/sessions/{sid}/auto")

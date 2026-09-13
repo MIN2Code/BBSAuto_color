@@ -1,3 +1,4 @@
+import * as THREE from 'three';
 import { Viewer } from './viewer.js?v=1';
 
 const $ = (id) => document.getElementById(id);
@@ -46,12 +47,24 @@ function renderParts() {
   const el = $('parts');
   $('pcount').textContent = s.parts.length ? `（${s.parts.length} 件）` : '';
   if (!s.parts.length) { el.innerHTML = '<span class="hint">尚未导入模型件</span>'; return; }
+  // 旗帜件置顶（人工复核优先），其余保持导入顺序
+  const REASON = { visible_too_few: '可见像素少', views_disagree: '视角色不一致', no_visible_pixels: '全视角不可见' };
+  const order = [];
+  s.parts.forEach((p, i) => { if (p.flagged) order.push(i); });
+  s.parts.forEach((p, i) => { if (!p.flagged) order.push(i); });
   el.innerHTML = '';
-  for (const p of s.parts) {
+  for (const i of order) {
+    const p = s.parts[i];
     const d = document.createElement('div');
     d.className = 'part' + (p.index === state.sel ? ' sel' : '');
+    const flag = p.flagged
+      ? `<span class="flag" title="${REASON[p.reason] || p.reason || '需复核'}">⚠${REASON[p.reason] || '需复核'}</span>` : '';
+    const conf = (p.conf !== undefined && p.conf !== null && !p.override)
+      ? `<span class="conf">置信 ${Math.round(p.conf * 100)}%</span>` : '';
+    const ov = p.override ? `<span class="conf" title="人工指定，自动流程不覆盖">已固定</span>` : '';
     d.innerHTML = `<span class="sw" style="background:${p.color || '#8a939e'}"></span>`
-      + `<span class="nm">${p.name}</span><div class="meta">${p.tris.toLocaleString()} 面 · ${p.area_cm2} cm²</div>`;
+      + `<span class="nm">${p.name}</span>${flag}${ov}${conf}`
+      + `<div class="meta">${p.tris.toLocaleString()} 面 · ${p.area_cm2} cm²</div>`;
     d.addEventListener('click', () => { state.sel = p.index; renderParts(); renderPalette(); });
     el.appendChild(d);
   }
@@ -75,7 +88,9 @@ function renderPalette() {
       });
       viewer.setPartColor(state.sel, c.hex);
       await refreshSession();
-      toast(`${state.session.parts[state.sel].name} → ${c.hex}`);
+      state.session.parts[state.sel].override = true;   // 人工改色=override，自动流程不覆盖
+      renderParts();
+      toast(`${state.session.parts[state.sel].name} → ${c.hex}（已固定）`);
     });
     el.appendChild(sw);
   }
@@ -93,11 +108,13 @@ async function uploadImages(files) {
     state.imageIndex = j.image_index !== undefined ? j.image_index : null;
     state.imageAngle[state.imageIndex] = parseFloat(document.getElementById('imgangle').value) || 0;
     renderPalette();
+    state.imageCount = (state.imageCount || 0) + 1;
     toast(`「${f.name}」提取到 ${j.palette.length} 个主色`);
     if (j.region_pending) pollRegionReady(state.imageIndex);
   }
   $('alignmode').disabled = !state.imageUrl;
   $('project').disabled = !state.imageUrl;
+  $('autocolor').disabled = !(state.imageUrl && state.session.parts.length);
 }
 
 // SAM2 后台分割完成提示：投影将自动切到区域模式（更稳的色块+更全的细节）
@@ -174,18 +191,23 @@ async function computeForegroundMask(imageIndex, W = 64, H = 64) {
   const dw = img.naturalWidth * sc, dh = img.naturalHeight * sc;
   ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh);
   const d = ctx.getImageData(0, 0, W, H).data;
-  const corners = [];
-  for (const [y0, x0] of [[0, 0], [0, W - 4], [H - 4, 0], [H - 4, W - 4]]) {
-    for (let y = y0; y < y0 + 4; y += 2) for (let x = x0; x < x0 + 4; x += 2) {
-      const o = (y * W + x) * 4;
-      corners.push([d[o], d[o + 1], d[o + 2]]);
-    }
+  // 背景估计：图像最外圈 8% 带内像素逐通道中值。转台图背景为平滑纯色/渐变；
+  // 白框（若有）占比小不改变中值。按行/列亮度判白框的旧方案对亮背景图会
+  // 误判全图为框（前景全零），弃用。
+  const band = Math.max(3, Math.round(W * 0.08));
+  const bgR = [], bgG = [], bgB = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    if (y >= band && y < H - band && x >= band && x < W - band) continue;
+    const o = (y * W + x) * 4;
+    bgR.push(d[o]); bgG.push(d[o + 1]); bgB.push(d[o + 2]);
   }
-  corners.sort((a, b) => (a[0] + a[1] + a[2]) - (b[0] + b[1] + b[2]));
-  const bg = corners[Math.floor(corners.length / 2)];
+  const med = (a) => a.sort((p, q) => p - q)[Math.floor(a.length / 2)];
+  const bg = [med(bgR), med(bgG), med(bgB)];
   const mask = new Uint8Array(W * H);
   let on = 0;
   for (let i = 0; i < W * H; i++) {
+    const y = Math.floor(i / W), x = i % W;
+    if (y < band || y >= H - band || x < band || x >= W - band) continue;  // 外圈带（混白框/背景）不当前景
     const o = i * 4;
     const dist = Math.sqrt((d[o]-bg[0])**2 + (d[o+1]-bg[1])**2 + (d[o+2]-bg[2])**2);
     if (dist > 42) { mask[i] = 1; on++; }
@@ -207,7 +229,8 @@ async function autoAlignCamera(imageIndex) {
     let inter = 0, union = 0;
     for (let i = 0; i < sil.w * sil.h; i++) {
       const a = fg.mask[i], b = sil.mask[i];
-      if (a && b) inter++; else if (a || b) union++;
+      if (a && b) { inter++; union++; }
+      else if (a || b) union++;
     }
     const iou = union ? inter / union : 0;
     if (iou > best.iou) best = { iou, az: azd, ratio: sil.ratio };
@@ -222,6 +245,152 @@ async function autoAlignCamera(imageIndex) {
   v.controls.update();
   return { azimuth: best.az, iou: Number(best.iou.toFixed(3)), distance: Math.round(dist) };
 }
+
+// ----------------------------------------------------- 转台全局姿态拟合 + 件级取色（一期主链路）
+// 所有视角共享相机 dist/height/fov，每视角仅方位角 θᵢ 一个自由变量（转台图强先验）。
+// 全局 Σ IoU(剪影, 前景掩码) 坐标下降精调。件可见性由 ID 缓冲几何决定 → 与视角顺序无关。
+async function fitTurntable(nViews) {
+  const v = window.__viewer;
+  const t = { x: v.controls.target.x, y: v.controls.target.y, z: v.controls.target.z };
+  const fgs = [];
+  for (let i = 0; i < nViews; i++) fgs.push(await computeForegroundMask(i));
+  let dist, height, fov = 25;   // fov 固定为长焦（转台图特性）：fov 与 dist 完全耦合，
+  //                           联合优化会走进"视野小于模型、剪影撑满画面"的退化解
+  {
+    const box = new THREE.Box3().setFromObject(v.group);
+    const size = box.getSize(new THREE.Vector3());
+    const radius = size.length() / 2;
+    dist = radius / Math.tan(fov * Math.PI / 360) * 1.15;   // 模型装进视野留 15% 边
+    height = Math.max(20, size.y * 0.25);                    // 略俯视（转台相机高度）
+  }
+  const az = new Array(nViews).fill(0);
+  const scoreOne = (i, a, d, h, f) => {
+    const s = v.renderSilhouetteAt(a, d, h, t, 64, 64, f);
+    let inter = 0, union = 0;
+    for (let k = 0; k < s.mask.length; k++) {
+      const x = fgs[i].mask[k], y = s.mask[k];
+      if (x && y) { inter++; union++; }        // 交集两侧都要计数（真 IoU）
+      else if (x || y) union++;
+    }
+    return union ? inter / union : 0;
+  };
+  const scoreAll = () => {
+    let s = 0;
+    for (let i = 0; i < nViews; i++) s += scoreOne(i, az[i], dist, height, fov);
+    return s / nViews;
+  };
+  // 0) dist 校准：按前景/剪影面积比缩放（渲染图多为特写构图、模型占画面比例高，
+  //    纯几何初值会把模型装得过小，坐标下降步长远不足以收敛）
+  for (let it = 0; it < 4; it++) {
+    const a0 = ((state.imageAngle || {})[0]) ?? 0;
+    const s0 = v.renderSilhouetteAt(a0, dist, height, t, 64, 64, fov);
+    if (s0.ratio > 0.02 && fgs[0].ratio > 0.02) {
+      if (Math.abs(s0.ratio - fgs[0].ratio) < 0.02) break;
+      dist = Math.max(60, dist * Math.sqrt(s0.ratio / fgs[0].ratio));
+    } else break;
+  }
+  // 1) 方位角策略（实测：手办剪影近似旋转对称，方位区分度仅 ±45°，无法靠剪影
+  //    消镜像歧义）→ 用户在 imgangle 填的方位角是硬先验：±15° 精调窗口；全局
+  //    dist/height/fov 由图 0 主导拟合（避免多图弱信号互相拖累），其余图仅精调 az。
+  const azPrior = [];
+  for (let i = 0; i < nViews; i++) {
+    const prior = (state.imageAngle || {})[i];
+    azPrior[i] = (prior !== undefined && prior !== null) ? prior : 0;
+  }
+  for (let i = 0; i < nViews; i++) az[i] = azPrior[i];
+  // 2) 全局 (dist, height, fov) 坐标下降：目标=各视角 IoU 之和；
+  //    各视角 az 在先验 ±15° 内 1° 步进精调
+  const descendGlobal = (key, delta) => {
+    const cur = scoreAll();
+    const od = dist, oh = height, of = fov;
+    for (const dir of [1, -1]) {
+      if (key === 'dist') dist = od + dir * delta;
+      if (key === 'height') height = oh + dir * delta;
+      if (key === 'fov') fov = Math.max(8, Math.min(60, of + dir * delta));
+      if (scoreAll() > cur) return true;
+      dist = od; height = oh; fov = of;
+    }
+    return false;
+  };
+  const descendAz = (i) => {
+    for (let a = azPrior[i] - 15; a <= azPrior[i] + 15; a++) {
+      const s = scoreOne(i, a, dist, height, fov);
+      if (s > bestAzS[i]) { bestAzS[i] = s; az[i] = a; }
+    }
+  };
+  const bestAzS = az.map((a, i) => scoreOne(i, a, dist, height, fov));
+  for (const [rD, rH] of [[15, 8], [8, 4], [4, 2], [2, 1]]) {
+    for (let g = 0; g < 4; g++) {
+      let moved = false;
+      moved = descendGlobal('dist', rD) || moved;
+      moved = descendGlobal('height', rH) || moved;
+      for (let i = 0; i < nViews; i++) descendAz(i);
+      if (!moved) break;
+    }
+  }
+  return { az, dist, height, fov, target: t, iou: Number(scoreAll().toFixed(3)) };
+}
+
+function turntableCamera(pose, i) {
+  const cam = new THREE.PerspectiveCamera(pose.fov, 1, 1, 5000);
+  const rad = pose.az[i] * Math.PI / 180;
+  cam.position.set(
+    pose.target.x + Math.sin(rad) * pose.dist,
+    pose.target.y + pose.height,
+    pose.target.z + Math.cos(rad) * pose.dist);
+  cam.lookAt(pose.target.x, pose.target.y, pose.target.z);
+  cam.updateMatrixWorld();
+  return cam;
+}
+
+async function captureIdBuffers(pose, nViews) {
+  // 每视角 ID 缓冲：尺寸/纵横比与渲染图降采样图一致 → 与像素完美对齐
+  const img = new Image();
+  img.src = `/api/sessions/${state.sid}/image.png?i=0`;
+  await img.decode();
+  const W = Math.min(1024, img.naturalWidth);
+  const H = Math.round(W * img.naturalHeight / img.naturalWidth);
+  for (let i = 0; i < nViews; i++) {
+    const cam = turntableCamera(pose, i);
+    cam.aspect = W / H;
+    cam.updateProjectionMatrix();
+    const { data, w, h } = window.__viewer.renderIdBuffer(cam, W, H);
+    const cv = document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    cv.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(data), w, h), 0, 0);
+    const blob = await new Promise((r) => cv.toBlob(r, 'image/png'));
+    const fd = new FormData();
+    fd.append('file', blob, `idbuf${i}.png`);
+    await fetch(`/api/sessions/${state.sid}/idbuf?i=${i}`, { method: 'POST', body: fd });
+    toast(`转台取色：采集 ID 缓冲 ${i + 1}/${nViews}…`, 2500);
+  }
+}
+
+$('autocolor').addEventListener('click', async () => {
+  if (!state.session.parts.length) { toast('先导入模型件'); return; }
+  const nViews = state.session.image_count || state.imageCount || 0;
+  if (!nViews) { toast('先上传渲染图'); return; }
+  try {
+    toast('转台取色：全局姿态拟合中…', 12000);
+    const pose = await fitTurntable(nViews);
+    window.__pose = pose;            // 诊断：拟合结果（az/dist/height/fov/iou）
+    state.pose = pose;
+    await captureIdBuffers(pose, nViews);
+    toast('转台取色：件级取色计算中…', 12000);
+    const j = await api(`/api/sessions/${state.sid}/autocolor`, { method: 'POST' });
+    for (const it of j.parts) {
+      const p = state.session.parts.find((x) => x.index === it.index);
+      if (p) { p.color = it.hex; p.conf = it.conf; p.flagged = it.flagged; p.reason = it.reason; }
+      viewer.setPartColor(it.index, it.hex);
+    }
+    renderParts();
+    const flagged = j.parts.filter((x) => x.flagged);
+    toast(`转台取色完成：${j.parts.length} 件（拟合 IoU ${pose.iou}）`
+      + (flagged.length ? `；${flagged.length} 件待人工复核（已置顶）` : ''), 6000);
+  } catch (e) {
+    toast(`转台取色失败：${e.message}`, 6000);
+  }
+});
 
 async function projectPaint(imageIndex) {
   $('project').addEventListener = $('project').addEventListener; // no-op

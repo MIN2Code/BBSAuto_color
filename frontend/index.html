@@ -24,6 +24,8 @@ h2 { font-size:13px; margin:0 0 8px; color:var(--accent); text-transform:upperca
 .part.sel { border-color:var(--accent); background:#152435; }
 .part .nm { font-weight:600; }
 .part .meta { color:var(--dim); font-size:12px; }
+.part .flag { color:#ffb84d; font-size:12px; margin-left:8px; }
+.part .conf { color:var(--dim); font-size:12px; margin-left:8px; }
 .sw { display:inline-block; width:16px; height:16px; border-radius:4px; vertical-align:-3px; margin-right:6px; border:1px solid #0006; }
 .swatch { width:26px; height:26px; border-radius:6px; cursor:pointer; border:2px solid transparent; display:inline-block; }
 .swatch:hover { border-color:#fff8; }
@@ -57,6 +59,10 @@ h2 { font-size:13px; margin:0 0 8px; color:var(--accent); text-transform:upperca
       <div class="row" style="margin-top:8px">
         <button class="btn primary" id="autoassign" disabled>自动按件配色</button>
         <span class="hint">按件面积 ↔ 色板占比对位</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="autocolor" disabled title="转台全局姿态拟合 + 件ID缓冲取色：每视角渲染件ID图，按可见像素取件色（无投影串色，与视角顺序无关）">转台取色（推荐）</button>
+        <span class="hint" id="autocolorhint">多张转台图一次全局对齐，逐件取色</span>
       </div>
       <div class="row" style="margin-top:8px">
         <button class="btn" id="alignmode" disabled title="渲染图半透明叠加到视口，旋转模型对齐图中姿态">对齐投影</button>

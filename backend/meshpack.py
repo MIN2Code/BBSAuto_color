@@ -58,7 +58,7 @@ def add_part(sid: str, name: str, data: bytes) -> dict:
     return part_summary(part, len(sess["parts"]) - 1)
 
 
-def part_summary(part: dict, idx: int) -> dict:
+def part_summary(part: dict, idx: int, overrides: dict | None = None) -> dict:
     v = part["vertices"]
     f = part["faces"]
     tri_v = v[f]  # (T,3,3)
@@ -70,6 +70,10 @@ def part_summary(part: dict, idx: int) -> dict:
         "tris": int(f.shape[0]),
         "area_cm2": round(area / 100.0, 1),
         "bbox": [np.min(v, axis=0).tolist(), np.max(v, axis=0).tolist()],
+        "conf": part.get("conf"),
+        "flagged": part.get("flagged", False),
+        "reason": part.get("reason", ""),
+        "override": idx in (overrides or {}),
     }
 
 
@@ -93,7 +97,7 @@ def session_summary(sid: str) -> dict:
         "image_name": sess["image_name"],
         "palette": sess["palette"],
         "up_axis": sess.get("up_axis", "y"),
-        "parts": [part_summary(p, i) for i, p in enumerate(sess["parts"])],
+        "parts": [part_summary(p, i, sess.get("overrides")) for i, p in enumerate(sess["parts"])],
     }
 
 
