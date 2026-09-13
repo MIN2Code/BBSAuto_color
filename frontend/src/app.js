@@ -347,7 +347,92 @@ async function fitTurntable(nViews) {
       if (!moved) break;
     }
   }
+  // 3.5) 轮廓 Chamfer 精调：前景色距掩码的面积/边界量均被"模型与背景同色区
+  //    缺失"污染，不可作对齐参考。改用渲染图梯度边缘点集的距离场：
+  //    模型轮廓（斗篷红边/发丝/底座暗边）在梯度图上是强边缘，剪影轮廓到最近
+  //    强边缘的 Chamfer 距离最小 = 尺度/偏移贴准。信号不依赖颜色分割。
+  {
+    const GW = 128;
+    const grad = await computeGradient(0, GW);
+    const sorted = Float32Array.from(grad.g).sort();
+    const thr = sorted[Math.floor(sorted.length * 0.9)];
+    const INF = 1e6;
+    const D = new Float32Array(GW * GW).fill(INF);
+    for (let i = 0; i < GW * GW; i++) if (grad.g[i] >= thr) D[i] = 0;
+    for (let y = 0; y < GW; y++) for (let x = 0; x < GW; x++) {
+      const i = y * GW + x; let d = D[i];
+      if (x > 0) d = Math.min(d, D[i - 1] + 1);
+      if (y > 0) { d = Math.min(d, D[i - GW] + 1); if (x > 0) d = Math.min(d, D[i - GW - 1] + 1.414); if (x < GW - 1) d = Math.min(d, D[i - GW + 1] + 1.414); }
+      D[i] = d;
+    }
+    for (let y = GW - 1; y >= 0; y--) for (let x = GW - 1; x >= 0; x--) {
+      const i = y * GW + x; let d = D[i];
+      if (x < GW - 1) d = Math.min(d, D[i + 1] + 1);
+      if (y < GW - 1) { d = Math.min(d, D[i + GW] + 1); if (x < GW - 1) d = Math.min(d, D[i + GW + 1] + 1.414); if (x > 0) d = Math.min(d, D[i + GW - 1] + 1.414); }
+      D[i] = d;
+    }
+    const chamfer = (i, d, sx, sy) => {
+      const s = v.renderSilhouetteAt(az[i], d, height, t, GW, GW, fov, sx * GW / 64, sy * GW / 64);
+      let sum = 0, n = 0;
+      for (let y = 1; y < GW - 1; y++) for (let x = 1; x < GW - 1; x++) {
+        const k = y * GW + x;
+        if (!s.mask[k]) continue;
+        if (s.mask[k - 1] && s.mask[k + 1] && s.mask[k - GW] && s.mask[k + GW]) continue;   // 仅轮廓
+        sum += Math.min(D[k], 30); n++;    // 截断防离群主导
+      }
+      return n > 60 ? sum / n : 1e6;
+    };
+    let best = { s: chamfer(0, dist, dx[0], dy[0]), dist, dx: dx[0], dy: dy[0] };
+    for (const sc of [0.8, 0.87, 0.94, 1.0, 1.07, 1.15]) {
+      for (let sx = -15; sx <= 15; sx += 5) for (let sy = -15; sy <= 15; sy += 5) {
+        const v2 = chamfer(0, dist * sc, dx[0] + sx, dy[0] + sy);
+        if (v2 < best.s) best = { s: v2, dist: dist * sc, dx: dx[0] + sx, dy: dy[0] + sy };
+      }
+    }
+    dist = best.dist; dx[0] = best.dx; dy[0] = best.dy;
+    for (const sc of [0.96, 0.98, 1.0, 1.02, 1.04]) {
+      for (let sx = -4; sx <= 4; sx += 2) for (let sy = -4; sy <= 4; sy += 2) {
+        const v2 = chamfer(0, dist * sc, dx[0] + sx, dy[0] + sy);
+        if (v2 < best.s) best = { s: v2, dist: dist * sc, dx: dx[0] + sx, dy: dy[0] + sy };
+      }
+    }
+    dist = best.dist; dx[0] = best.dx; dy[0] = best.dy;
+    for (let i = 1; i < nViews; i++) {
+      const b = { s: chamfer(i, dist, dx[i], dy[i]), dx: dx[i], dy: dy[i] };
+      for (let sx = -15; sx <= 15; sx += 5) for (let sy = -15; sy <= 15; sy += 5) {
+        const v2 = chamfer(i, dist, dx[i] + sx, dy[i] + sy);
+        if (v2 < b.s) { b.s = v2; b.dx = dx[i] + sx; b.dy = dy[i] + sy; }
+      }
+      dx[i] = b.dx; dy[i] = b.dy;
+    }
+  }
   return { az, dist, height, fov, target: t, dx, dy, iou: Number(scoreAll().toFixed(3)) };
+}
+
+// 渲染图梯度幅值图（Sobel 近似，拉伸到 W×H 与 ID 缓冲相机投影同构）。
+// 背景平滑低梯度、模型轮廓/纹理高梯度——用于对"模型掩码内梯度能量"的
+// 尺度/偏移精调，不依赖前景色距分割（后者对与背景同色的模型区域系统性缺失）。
+async function computeGradient(imageIndex, W = 256) {
+  const img = new Image();
+  img.src = `/api/sessions/${state.sid}/image.png?i=${imageIndex}`;
+  await img.decode();
+  const H = Math.round(W * img.naturalHeight / img.naturalWidth);
+  const cv = document.createElement('canvas');
+  cv.width = W; cv.height = H;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, W, H);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  const lum = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) lum[i] = 0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2];
+  const g = new Float32Array(W * H);
+  for (let y = 1; y < H - 1; y++) {
+    for (let x = 1; x < W - 1; x++) {
+      const i = y * W + x;
+      const gx = lum[i + 1] - lum[i - 1], gy = lum[i + W] - lum[i - W];
+      g[i] = Math.sqrt(gx * gx + gy * gy);
+    }
+  }
+  return { g, W, H };
 }
 
 function turntableCamera(pose, i) {

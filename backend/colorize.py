@@ -183,6 +183,12 @@ def recolor_session(sess: dict) -> list:
                 item.update({"flagged": True, "reason": "visible_too_few"})
             elif len(pv) >= 3 and float(dE.std()) > DISAGREE_DE:
                 item.update({"flagged": True, "reason": "views_disagree"})
+                if float(dE.std()) > DISAGREE_DE * 2.2:
+                    # 跨视角严重不一致（典型：渲染图姿势≠STL装配姿势，如兜帽佩戴/
+                    # 垂落状态差；或严重遮挡）——本视角组取不到可信本色，
+                    # 不落色交人工（保留旧色），错误自信比无色更有害
+                    item.update({"hex": p.get("color") or "#8A939E",
+                                 "reason": "views_disagree_hard", "conf": 0.0})
         if str(pi) in overrides:                  # override 持久层最后生效
             item.update({"hex": overrides[str(pi)], "override": True,
                          "flagged": False, "reason": ""})
