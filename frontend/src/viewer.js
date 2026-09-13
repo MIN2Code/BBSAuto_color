@@ -319,6 +319,17 @@ export class Viewer {
     return depth;
   }
 
+  /** 清除件的面级顶点色，恢复整件单色（件级取色后调用；face_slots 属二期子件层）。 */
+  clearFaceColors(idx, partColor) {
+    const m = this.meshes.find((x) => x.userData.partIndex === idx);
+    if (!m) return;
+    if (m.geometry.getAttribute('color')) m.geometry.deleteAttribute('color');
+    m.material.vertexColors = false;
+    m.material.color.set(partColor || '#8a939e');
+    m.material.needsUpdate = true;
+    this.invalidate();
+  }
+
   /** 件内逐面上色：slots[i]=槽号（0=未涂→件色），paletteHex 为色板色。 */
   setFaceColors(idx, slots, paletteHex, partColor) {
     const m = this.meshes.find((x) => x.userData.partIndex === idx);

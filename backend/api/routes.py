@@ -284,7 +284,8 @@ def autocolor(sid: str):
     if not sess.get("idbufs") or all(b is None for b in sess["idbufs"]):
         raise HTTPException(409, "无件 ID 缓冲（先在前端完成转台拟合与采集）")
     results = colorize.recolor_session(sess)
-    # 取色结果写回件色（override 已在 colorize 内最后生效）
+    # 取色结果写回件色（override 已在 colorize 内最后生效）；
+    # 件级架构下面级色（face_slots，二期子件层）整体作废
     for item in results:
         pi = item["index"]
         if 0 <= pi < len(sess["parts"]) and item.get("hex"):
@@ -292,6 +293,7 @@ def autocolor(sid: str):
             sess["parts"][pi]["conf"] = item.get("conf")
             sess["parts"][pi]["flagged"] = item.get("flagged", False)
             sess["parts"][pi]["reason"] = item.get("reason", "")
+            sess["parts"][pi]["face_slots"] = None
     return {"parts": results}
 
 

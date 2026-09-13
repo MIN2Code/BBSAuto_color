@@ -412,7 +412,7 @@ $('autocolor').addEventListener('click', async () => {
     for (const it of j.parts) {
       const p = state.session.parts.find((x) => x.index === it.index);
       if (p) { p.color = it.hex; p.conf = it.conf; p.flagged = it.flagged; p.reason = it.reason; }
-      viewer.setPartColor(it.index, it.hex);
+      viewer.clearFaceColors(it.index, it.hex);   // 件级架构：清旧面级色，恢复整件纯色
     }
     renderParts();
     const flagged = j.parts.filter((x) => x.flagged);
