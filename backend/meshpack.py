@@ -73,7 +73,7 @@ def part_summary(part: dict, idx: int, overrides: dict | None = None) -> dict:
         "conf": part.get("conf"),
         "flagged": part.get("flagged", False),
         "reason": part.get("reason", ""),
-        "override": idx in (overrides or {}),
+        "override": str(idx) in (overrides or {}),
     }
 
 

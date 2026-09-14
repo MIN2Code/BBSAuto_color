@@ -137,8 +137,8 @@ def recolor_session(sess: dict) -> list:
         ids = idb[..., 0].astype(np.int64) + idb[..., 1].astype(np.int64) * 256
         views.append((imgc, ids, hygiene_mask(img)))
 
-    per_part = [[] for _ in range(n)]             # pid-1 → [(lab_med, npix)]
-    for imgc, ids, hm in views:
+    per_part = [[] for _ in range(n)]             # pid-1 → [(view_index, lab_med, npix)]
+    for view_index, (imgc, ids, hm) in enumerate(views):
         # 逐件掩码取色
         for pid in range(1, n + 1):
             m = (ids == pid)
@@ -151,21 +151,24 @@ def recolor_session(sess: dict) -> list:
             if m.sum() < 8:
                 continue
             lab = srgb8_to_lab(imgc[m])
-            per_part[pid - 1].append((trimmed_median(lab), int(m.sum())))
+            per_part[pid - 1].append((view_index, trimmed_median(lab), int(m.sum())))
 
     overrides = sess.get("overrides") or {}
     out = []
     for pi, pv in enumerate(per_part):
         p = parts[pi]
         item = {"index": pi, "name": p.get("name", f"part{pi}"),
-                "flagged": False, "reason": "", "conf": 0.0}
+                "hex": p.get("color") or "#8A939E", "conf": 0.0,
+                "flagged": False, "reason": "", "pixels": 0, "views": 0,
+                "override": False}
         if not pv:
             item.update({"hex": p.get("color") or "#8A939E", "flagged": True,
                          "reason": "no_visible_pixels", "pixels": 0})
         else:
-            pix_total = sum(x[1] for x in pv)
-            labs = np.stack([x[0] for x in pv])
-            wts = np.array([x[1] for x in pv], dtype=np.float64)
+            pv.sort(key=lambda x: (x[0], tuple(x[1]), x[2]))
+            pix_total = sum(x[2] for x in pv)
+            labs = np.stack([x[1] for x in pv])
+            wts = np.array([x[2] for x in pv], dtype=np.float64)
             # 取亮视角：同灯转台图同件跨视角明暗差大（受光面/背光面），
             # 人眼认知的"件色"是受光面色——按 L 降序取前 60% 视角加权中位
             keep = max(2, int(np.ceil(len(pv) * 0.6)))
