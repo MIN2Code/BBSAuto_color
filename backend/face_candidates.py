@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 import numpy as np
 
-from backend.colorize import srgb8_to_lab, trimmed_median
+from backend.colorize import lab_hex, srgb8_to_lab, trimmed_median, weighted_median
+from backend.mesh_edges import build_face_adjacency, grow_region
 from backend.meshpack import face_geometry
 
 
@@ -18,6 +19,19 @@ class FaceEvidence:
     lab: tuple[float, float, float]
     visibility: float
     pixel_count: int
+
+
+@dataclass(frozen=True)
+class CandidateRegion:
+    """A connected group of faces whose color departs from the part base."""
+
+    region_id: int
+    faces: frozenset[int]
+    color_hex: str
+    support_views: int
+    confidence: float
+    accepted: bool
+    reason: str
 
 
 _DEPTH_REL_TOLERANCE = 0.01
@@ -95,6 +109,75 @@ def collect_face_candidates(
             )
 
     return candidates
+
+
+def discover_regions(
+    part: Mapping[str, Any],
+    evidence_by_face: Mapping[int, Iterable[FaceEvidence]],
+    base_lab: tuple[float, float, float],
+    min_delta_e: float = 10.0,
+    min_faces: int = 8,
+) -> list[CandidateRegion]:
+    """Discover connected secondary-color candidate regions inside a part.
+
+    Faces whose cross-view representative Lab departs from the part base color
+    by >= ``min_delta_e`` are grown into connected regions ("paint on the
+    edge" semantics: BFS stops at color boundaries).  Regions smaller than
+    ``min_faces`` are dropped as speckle noise.  Discovery only — acceptance
+    is decided later by ``decide_regions``.
+    """
+    centroids, normals = face_geometry(part)
+    adjacency = build_face_adjacency(np.asarray(part["faces"]))
+    face_count = len(adjacency)
+
+    base = np.asarray(base_lab, dtype=float)
+    rep = np.tile(base, (face_count, 1))       # 无证据面回落基色：永不成为种子
+    pixels = np.zeros(face_count)
+    views: dict[int, set[int]] = {}
+    for face_index, entries in evidence_by_face.items():
+        entries = list(entries)
+        if not entries:
+            continue
+        labs = np.array([e.lab for e in entries], dtype=float)
+        weights = np.array([e.pixel_count for e in entries], dtype=float)
+        rep[face_index] = weighted_median(labs, weights)
+        pixels[face_index] = weights.sum()
+        views[face_index] = {e.view_index for e in entries}
+
+    delta = np.linalg.norm(rep - base, axis=1)
+    secondary = [f for f in range(face_count) if delta[f] >= min_delta_e]
+
+    # 法线约束关闭（180°）：涂装色块常跨折痕/硬边，颜色边界才是生长停止条件
+    claimed = np.zeros(face_count, dtype=bool)
+    regions = []
+    for seed in secondary:
+        if claimed[seed]:
+            continue
+        mask = grow_region([seed], adjacency, normals, rep, 180.0, min_delta_e)
+        claimed |= mask
+        faces = {int(f) for f in np.flatnonzero(mask)}
+        if len(faces) < min_faces:
+            continue
+        regions.append((faces, views))
+
+    # 确定性排序：大面积优先，同面积按最小面号；region_id 按此顺序分配
+    regions.sort(key=lambda item: (-len(item[0]), min(item[0])))
+    out = []
+    for region_id, (faces, face_views) in enumerate(regions):
+        face_list = sorted(faces)
+        region_labs = rep[face_list]
+        region_weights = pixels[face_list]
+        color = weighted_median(region_labs, region_weights)
+        out.append(CandidateRegion(
+            region_id=region_id,
+            faces=frozenset(faces),
+            color_hex=lab_hex(color),
+            support_views=len(set().union(*(face_views[f] for f in face_list))),
+            confidence=0.0,
+            accepted=False,
+            reason="discovered",
+        ))
+    return out
 
 
 def _array_from_view(view: Mapping[str, Any], *names: str) -> np.ndarray:

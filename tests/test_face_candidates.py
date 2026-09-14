@@ -1,6 +1,11 @@
 import numpy as np
 
-from backend.face_candidates import FaceEvidence, collect_face_candidates
+from backend.colorize import srgb8_to_lab
+from backend.face_candidates import (
+    FaceEvidence,
+    collect_face_candidates,
+    discover_regions,
+)
 
 
 def _part(face_slots=None, reverse=False):
@@ -95,3 +100,51 @@ def test_cover_mapping_samples_render_image_coordinates():
     result = collect_face_candidates(part, [view], "#FFFFFF")
 
     assert len(result[0]) == 1
+
+
+def _lab_of(hex_color):
+    rgb = np.array([[int(hex_color[i:i + 2], 16) for i in (1, 3, 5)]], dtype=np.uint8)
+    return tuple(float(v) for v in srgb8_to_lab(rgb)[0])
+
+
+def _fan_part(n_faces=7):
+    """n_faces 个共面三角形共享边 (v0,v1)：邻接图完全连通、法线一致。"""
+    vertices = [(-1.0, -1.0, 0.0), (1.0, -1.0, 0.0)]
+    faces = []
+    for k in range(n_faces):
+        vertices.append((-0.8 + 0.3 * k, 1.0, 0.0))
+        faces.append([0, 1, 2 + k])
+    return {
+        "vertices": np.array(vertices, dtype=np.float64),
+        "faces": np.array(faces, dtype=np.int32),
+        "face_slots": [0] * n_faces,
+    }
+
+
+def _make_evidence(secondary_faces, base_hex="#FFFFFF", secondary_hex="#D22A1F"):
+    evidence = {}
+    for face_index in range(7):
+        lab = _lab_of(secondary_hex if face_index in secondary_faces else base_hex)
+        evidence[face_index] = [FaceEvidence(0, lab, 1.0, 100)]
+    return evidence
+
+
+def test_discovers_connected_secondary_color():
+    part = _fan_part()
+    evidence = _make_evidence({4, 5, 6})
+
+    regions = discover_regions(part, evidence, _lab_of("#FFFFFF"),
+                               min_delta_e=10, min_faces=3)
+
+    assert len(regions) == 1
+    assert regions[0].faces == {4, 5, 6}
+
+
+def test_rejects_isolated_single_face_noise():
+    part = _fan_part()
+    evidence = _make_evidence({6})
+
+    regions = discover_regions(part, evidence, _lab_of("#FFFFFF"),
+                               min_delta_e=10, min_faces=3)
+
+    assert regions == []
