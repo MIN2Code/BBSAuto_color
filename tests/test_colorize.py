@@ -27,7 +27,10 @@ def test_recolor_is_independent_of_view_order(make_color_session):
     sess["images"].reverse()
     sess["idbufs"].reverse()
     b = recolor_session(sess)
-    assert [(x["index"], x["hex"]) for x in a] == [(x["index"], x["hex"]) for x in b]
+    fields = ("index", "name", "hex", "conf", "flagged", "reason", "pixels", "views", "override")
+    assert [tuple(x[field] for field in fields) for x in a] == [
+        tuple(x[field] for field in fields) for x in b
+    ]
 
 
 def test_override_wins_after_recolor(make_color_session):
@@ -69,7 +72,5 @@ def test_same_brightness_candidates_are_order_independent(make_color_session, mo
     sess["images"].reverse()
     sess["idbufs"].reverse()
     b = recolor_session(sess)[0]
-    assert (a["conf"], a["flagged"], a["reason"], a["pixels"], a["views"], a["override"]) == (
-        b["conf"], b["flagged"], b["reason"], b["pixels"], b["views"], b["override"]
-    )
-    assert a["hex"] == b["hex"]
+    fields = ("index", "name", "hex", "conf", "flagged", "reason", "pixels", "views", "override")
+    assert tuple(a[field] for field in fields) == tuple(b[field] for field in fields)
