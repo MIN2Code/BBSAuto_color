@@ -148,3 +148,46 @@ def test_rejects_isolated_single_face_noise():
                                min_delta_e=10, min_faces=3)
 
     assert regions == []
+
+
+def _region(faces, hex_color="#D22A1F", confidence=0.9, views=3, slot=5, rid=0):
+    from backend.face_candidates import CandidateRegion
+    return CandidateRegion(region_id=rid, faces=frozenset(faces), color_hex=hex_color,
+                           support_views=views, confidence=confidence,
+                           accepted=False, reason="discovered", slot=slot)
+
+
+def test_decision_is_independent_of_region_order():
+    import copy
+    from backend.face_candidates import decide_regions
+
+    regions = [_region({4, 5, 6}, confidence=0.9, views=3),
+               _region({0, 1}, hex_color="#2A46D2", confidence=0.5, views=1, rid=1)]
+    shuffled = copy.deepcopy(regions)
+    shuffled.reverse()
+
+    a = decide_regions(regions)
+    b = decide_regions(shuffled)
+    key = lambda rs: sorted((tuple(sorted(r.faces)), r.color_hex, r.accepted) for r in rs)
+    assert key(a) == key(b)
+    assert [r.accepted for r in a] == [True, False]
+
+
+def test_low_confidence_region_keeps_base_color():
+    from backend.face_candidates import apply_face_layers, decide_regions
+
+    low = decide_regions([_region({4, 5}, confidence=0.3, views=1)])[0]
+    assert not low.accepted
+    slots = apply_face_layers(np.zeros(10, dtype=np.uint8), [low], {})
+    assert np.all(slots == 0)
+
+
+def test_manual_override_wins_over_accepted_region():
+    from backend.face_candidates import apply_face_layers, decide_regions
+
+    accepted = decide_regions([_region({2, 3, 4})])[0]
+    assert accepted.accepted
+    slots = apply_face_layers(np.zeros(10, dtype=np.uint8), [accepted], {2: 7})
+    assert slots[2] == 7
+    assert slots[3] == 5
+    assert slots.dtype == np.uint8

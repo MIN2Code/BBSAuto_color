@@ -1,7 +1,7 @@
 """Collect per-face color evidence from multi-view render buffers."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Iterable, Mapping
 
 import numpy as np
@@ -9,6 +9,9 @@ import numpy as np
 from backend.colorize import lab_hex, srgb8_to_lab, trimmed_median, weighted_median
 from backend.mesh_edges import build_face_adjacency, grow_region
 from backend.meshpack import face_geometry
+
+_REGION_PIX_FULL = 400        # 可见像素满置信预算（≈20×20 色块）
+_REGION_SPREAD_FULL = 6.0     # 区域内代表色 ΔE 离散度饱和点
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,7 @@ class CandidateRegion:
     confidence: float
     accepted: bool
     reason: str
+    slot: int = 0               # 色板槽号（0=未分配），由 API/导出层赋值
 
 
 _DEPTH_REL_TOLERANCE = 0.01
@@ -168,16 +172,63 @@ def discover_regions(
         region_labs = rep[face_list]
         region_weights = pixels[face_list]
         color = weighted_median(region_labs, region_weights)
+        # 置信度（初步，决策层 decide_regions 为最终裁决）：可见像素预算、
+        # 独立视角数、区域内颜色一致性（跨视角逐面代表色的离散度）
+        pix_factor = min(1.0, float(region_weights.sum()) / _REGION_PIX_FULL)
+        view_factor = min(1.0, len(set().union(*face_views.values())) / 2.0)
+        spread = float(np.linalg.norm(region_labs - color, axis=1).std())
+        coherence = max(0.0, 1.0 - spread / _REGION_SPREAD_FULL)
+        confidence = round(0.4 * pix_factor + 0.4 * view_factor + 0.2 * coherence, 3)
         out.append(CandidateRegion(
             region_id=region_id,
             faces=frozenset(faces),
             color_hex=lab_hex(color),
-            support_views=len(set().union(*(face_views[f] for f in face_list))),
-            confidence=0.0,
+            support_views=len(set().union(*face_views.values())),
+            confidence=confidence,
             accepted=False,
             reason="discovered",
         ))
     return out
+
+
+def decide_regions(
+    regions: list[CandidateRegion],
+    min_confidence: float = 0.75,
+    min_views: int = 2,
+) -> list[CandidateRegion]:
+    """Globally decide region acceptance; input order never affects results.
+
+    Acceptance needs both enough confidence and independent view support; a
+    single weak view never paints (same discipline as views_disagree_hard in
+    the part-level stage).  Returns new CandidateRegion objects — inputs are
+    not mutated.
+    """
+    out = []
+    for region in regions:
+        if region.confidence >= min_confidence and region.support_views >= min_views:
+            out.append(replace(region, accepted=True, reason="accepted"))
+        elif region.support_views < min_views:
+            out.append(replace(region, accepted=False, reason="few_views"))
+        else:
+            out.append(replace(region, accepted=False, reason="low_confidence"))
+    return out
+
+
+def apply_face_layers(
+    base_slots: np.ndarray,
+    accepted_regions: Iterable[CandidateRegion],
+    face_overrides: Mapping[int, int],
+) -> np.ndarray:
+    """Compose per-face slots: base -> accepted regions -> manual overrides."""
+    slots = np.asarray(base_slots, dtype=np.uint8).copy()
+    for region in accepted_regions:
+        if not region.accepted or region.slot == 0:
+            continue
+        for face in region.faces:
+            slots[face] = region.slot
+    for face, slot in face_overrides.items():
+        slots[int(face)] = int(slot)
+    return slots
 
 
 def _array_from_view(view: Mapping[str, Any], *names: str) -> np.ndarray:
