@@ -58,6 +58,25 @@ def add_part(sid: str, name: str, data: bytes) -> dict:
     return part_summary(part, len(sess["parts"]) - 1)
 
 
+def face_geometry(part: dict) -> tuple[np.ndarray, np.ndarray]:
+    """Return face centroids and unit normals without mutating the part."""
+    vertices = np.asarray(part["vertices"], dtype=np.float64)
+    faces = np.asarray(part["faces"], dtype=np.int64)
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        raise ValueError("vertices must have shape (N, 3)")
+    if faces.ndim != 2 or faces.shape[1] != 3:
+        raise ValueError("faces must have shape (T, 3)")
+
+    triangles = vertices[faces]
+    centroids = triangles.mean(axis=1)
+    normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+    lengths = np.linalg.norm(normals, axis=1)
+    unit_normals = np.zeros_like(normals)
+    valid = lengths > 0
+    unit_normals[valid] = normals[valid] / lengths[valid, None]
+    return centroids, unit_normals
+
+
 def part_summary(part: dict, idx: int, overrides: dict | None = None) -> dict:
     v = part["vertices"]
     f = part["faces"]
