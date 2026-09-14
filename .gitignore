@@ -8,3 +8,4 @@ _*.png
 _test_sam*
 _rossi01_albedo.png
 _research/
+.worktrees/
