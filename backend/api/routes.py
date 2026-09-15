@@ -530,7 +530,9 @@ def export_3mf(sid: str):
     sess = meshpack.get_session(sid)
     if not sess["parts"]:
         raise HTTPException(409, "会话内没有模型件")
-    data = threemf_out.write_project_3mf(sess["parts"], sess.get("palette_colors") or [])
+    data = threemf_out.write_project_3mf(
+        sess["parts"], sess.get("palette_colors") or [],
+        face_slot_colors=sess.get("phase2_palette") or [])
     return Response(
         content=data,
         media_type="application/octet-stream",

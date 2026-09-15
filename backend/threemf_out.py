@@ -47,36 +47,42 @@ def _head() -> str:
             'xmlns:bambu="https://schemas.bambulab.org/package/2022/06">')
 
 
-def _mesh_xml(part: dict) -> str:
+def _mesh_xml(part: dict, face_codes: list[str | None] | None = None) -> str:
     res = ["<mesh>", "<vertices>"]
     for x, y, z in part["vertices"]:
         res.append(f'<vertex x="{x:.4f}" y="{y:.4f}" z="{z:.4f}"/>')
     res.append("</vertices><triangles>")
-    slots = part.get("face_slots")
-    f_slots = slots if slots is not None else []
+    if face_codes is None:                   # 无合并层：槽号直指耗材位（旧行为）
+        slots = part.get("face_slots")
+        f_slots = slots if slots is not None else []
+        face_codes = [SLOT_CODES[s - 1] if 1 <= s <= len(SLOT_CODES) else None
+                      for s in f_slots]
     for i, (a, b, c) in enumerate(part["faces"]):
-        pc = ""
-        if i < len(f_slots) and f_slots[i]:
-            code = SLOT_CODES[f_slots[i] - 1] if 1 <= f_slots[i] <= len(SLOT_CODES) else None
-            if code:
-                pc = f' paint_color="{code}"'
+        pc = f' paint_color="{face_codes[i]}"' if i < len(face_codes) and face_codes[i] else ""
         res.append(f'<triangle v1="{a}" v2="{b}" v3="{c}"{pc}/>')
     res.append("</triangles></mesh>")
     return "\n".join(res)
 
 
-def write_project_3mf(parts: list[dict], palette_colors: list[str] | None = None) -> bytes:
+def write_project_3mf(parts: list[dict], palette_colors: list[str] | None = None,
+                      face_slot_colors: list[str] | None = None) -> bytes:
     """parts: [{name, vertices, faces, color('#RRGGBB'), face_slots?}]
 
     连续 RGB 输出（一期默认）：filament_colour = 件色去重列表（每件基础 extruder），
     实际耗材映射由用户在切片软件中自行设置。palette_colors 仅在显式传入时
-    并入耗材表（可选"吸附到已有色板"，默认关）。face_slots（1-based 槽号）为
-    二期件内子件预留：有则逐面写 paint_color。
+    并入耗材表（可选"吸附到已有色板"，默认关）。
+
+    face_slot_colors（二期）：face_slots 的槽色表（phase2_palette）。提供时
+    face_slots 解释为槽色表下标（1-based），区域色按首现顺序并入耗材表，
+    逐面 paint_color 重映射到合并后位置；超出 16 耗材上限的色不写 paint_color。
     """
     colors: list[str] = []
     for p in parts:
         c = (p.get("color") or "").upper()
         if c and c not in colors:
+            colors.append(c)
+    for c in (c.upper() for c in (face_slot_colors or [])):
+        if c not in colors:
             colors.append(c)
     for c in (c.upper() for c in (palette_colors or [])):
         if c not in colors:
@@ -84,6 +90,7 @@ def write_project_3mf(parts: list[dict], palette_colors: list[str] | None = None
     if not colors:
         colors = ["#808080"]
     color_to_ext = {c: i + 1 for i, c in enumerate(colors)}
+    slot_colors = [c.upper() for c in (face_slot_colors or [])]
 
     # ---- 主模型（引用型）----
     main = [_head()]
@@ -104,9 +111,17 @@ def write_project_3mf(parts: list[dict], palette_colors: list[str] | None = None
         z.writestr("3D/3dmodel.model", "\n".join(main))
         for oi, p in enumerate(parts):
             nm = _esc(p["name"])
+            codes = None
+            slots = p.get("face_slots")
+            if slot_colors and slots:
+                codes = []
+                for s in slots:
+                    hex_color = slot_colors[s - 1] if 1 <= s <= len(slot_colors) else None
+                    pos = color_to_ext.get(hex_color) if hex_color else None
+                    codes.append(SLOT_CODES[pos - 1] if pos and pos <= len(SLOT_CODES) else None)
             nest = [_head(), "<resources>",
                     f'<object id="1" name="{nm}" type="model">',
-                    _mesh_xml(p), "</object>", "</resources>", "<build/>",
+                    _mesh_xml(p, codes), "</object>", "</resources>", "<build/>",
                     "</model>"]
             z.writestr(f"3D/Objects/part_{oi}.model", "\n".join(nest))
 
