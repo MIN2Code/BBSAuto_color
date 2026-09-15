@@ -536,3 +536,145 @@ def export_3mf(sid: str):
         media_type="application/octet-stream",
         headers={"Content-Disposition": 'attachment; filename="autocolor_project.3mf"'},
     )
+
+
+# ------------------------------------------------------------ 二期：件内候选区域
+
+def _phase2_region_json(region, part_index: int) -> dict:
+    return {"part_index": part_index, "region_id": region.region_id,
+            "faces": sorted(int(f) for f in region.faces),
+            "color_hex": region.color_hex, "support_views": region.support_views,
+            "confidence": region.confidence, "accepted": region.accepted,
+            "reason": region.reason, "slot": region.slot}
+
+
+def _phase2_slot_of(sess: dict, hex_color: str) -> int:
+    """区域色/人工色入二期色表（1-based 槽号，与 face_slots 编码一致）。"""
+    pal = sess.setdefault("phase2_palette", [])
+    h = (hex_color or "").upper()
+    if not h.startswith("#") or len(h) != 7:
+        return 0
+    if h not in pal:
+        pal.append(h)
+    return pal.index(h) + 1
+
+
+def _hex_rgb(hex_color: str) -> np.ndarray:
+    h = (hex_color or "#FFFFFF").upper()
+    return np.array([[int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)]], dtype=np.uint8)
+
+
+@router.post("/sessions/{sid}/phase2/collect")
+def phase2_collect(sid: str, body: dict = None):
+    """同步候选收集与决策：只发现与裁决，不写任何 face_slots（先收集后决策）。"""
+    from ..face_candidates import (collect_face_candidates, decide_regions,
+                                   discover_regions)
+    sess = meshpack.get_session(sid)
+    images = sess.get("images") or []
+    idbufs = sess.get("idbufs") or []
+    cameras = ((body or {}).get("cameras") or [])
+    if not images or all(b is None for b in idbufs) or len(cameras) != len(images):
+        raise HTTPException(409, "二期候选收集需要渲染图、ID 缓冲与每视角相机参数（先完成转台拟合采集）")
+
+    sess["phase2_status"] = "collecting"
+    try:
+        views = []
+        for i in range(len(images)):
+            idb = idbufs[i] if i < len(idbufs) else None
+            if idb is None or cameras[i] is None:
+                continue
+            img = images[i]
+            if idb.shape[:2] != img.shape[:2]:
+                from PIL import Image as PILImage
+                idb = np.asarray(PILImage.fromarray(idb).resize(
+                    (img.shape[1], img.shape[0]), PILImage.NEAREST), dtype=np.uint8)
+            # 相机 w/h 对齐渲染图尺寸：idbuf 按图像纵横比渲染，cover 退化为纯缩放
+            cam = dict(cameras[i])
+            cam["w"], cam["h"] = int(img.shape[1]), int(img.shape[0])
+            views.append({"camera": cam, "image": img, "id_buffer": idb, "depth": None})
+
+        all_regions = []
+        for pi, part in enumerate(sess["parts"]):
+            evidence = collect_face_candidates({**part, "index": pi}, views,
+                                               part.get("color") or "#FFFFFF")
+            base_lab = tuple(float(v) for v in colorize.srgb8_to_lab(
+                _hex_rgb(part.get("color") or "#FFFFFF"))[0])
+            regions = decide_regions(discover_regions(part, evidence, base_lab))
+            all_regions.extend(_phase2_region_json(r, pi) for r in regions)
+        sess["phase2_regions"] = all_regions
+        sess["phase2_status"] = "ready"
+        sess.pop("phase2_error", None)
+    except HTTPException:
+        sess["phase2_status"] = "failed"
+        raise
+    except Exception as exc:                     # 件级颜色与人工 override 不动
+        sess["phase2_status"] = "failed"
+        sess["phase2_error"] = str(exc)
+        raise HTTPException(500, f"候选收集失败：{exc}")
+
+    accepted = sum(1 for r in all_regions if r["accepted"])
+    return {"status": "ready", "parts": len(sess["parts"]),
+            "regions": len(all_regions), "accepted": accepted}
+
+
+@router.get("/sessions/{sid}/phase2")
+def phase2_get(sid: str):
+    sess = meshpack.get_session(sid)
+    regions = sess.get("phase2_regions") or []
+    accepted = sum(1 for r in regions if r.get("accepted"))
+    return {"status": sess.get("phase2_status", "idle"),
+            "error": sess.get("phase2_error"),
+            "palette": sess.get("phase2_palette") or [],
+            "parts": [{"index": pi, "name": p.get("name"), "color": p.get("color"),
+                       "flagged": p.get("flagged", False),
+                       "regions": [r for r in regions if r.get("part_index") == pi]}
+                      for pi, p in enumerate(sess["parts"])],
+            "summary": {"regions": len(regions), "accepted": accepted,
+                        "review": len(regions) - accepted}}
+
+
+@router.post("/sessions/{sid}/phase2/apply")
+def phase2_apply(sid: str):
+    """仅应用 accepted 区域与人工 face override → 写 face_slots（件级底色不动）。"""
+    from ..face_candidates import CandidateRegion, apply_face_layers
+    sess = meshpack.get_session(sid)
+    if sess.get("phase2_status") != "ready":
+        raise HTTPException(409, "先运行候选收集（POST /phase2/collect）")
+    regions = sess.get("phase2_regions") or []
+    by_part = {}
+    for r in regions:
+        if r.get("accepted"):
+            r["slot"] = _phase2_slot_of(sess, r.get("color_hex", ""))
+            by_part.setdefault(r["part_index"], []).append(
+                CandidateRegion(region_id=r["region_id"],
+                                faces=frozenset(r["faces"]),
+                                color_hex=r["color_hex"],
+                                support_views=r["support_views"],
+                                confidence=r["confidence"],
+                                accepted=True, reason=r["reason"], slot=r["slot"]))
+    painted = 0
+    for pi, part in enumerate(sess["parts"]):
+        overrides = (sess.get("face_overrides") or {}).get(str(pi)) or {}
+        override_slots = {int(f): _phase2_slot_of(sess, h) for f, h in overrides.items()}
+        if pi not in by_part and not override_slots:
+            continue
+        base = np.zeros(len(part["faces"]), dtype=np.uint8)
+        slots = apply_face_layers(base, by_part.get(pi, []), override_slots)
+        part["face_slots"] = slots.tolist()
+        painted += 1
+    sess["phase2_status"] = "ready"
+    return {"ok": True, "painted_parts": painted,
+            "palette": sess.get("phase2_palette") or []}
+
+
+@router.delete("/sessions/{sid}/phase2/auto")
+def phase2_clear(sid: str):
+    """清自动候选与面级色，保留人工 override（重跑自动不冲掉手改）。"""
+    sess = meshpack.get_session(sid)
+    sess["phase2_regions"] = []
+    sess["phase2_status"] = "idle"
+    sess["phase2_palette"] = []
+    sess.pop("phase2_error", None)
+    for part in sess["parts"]:
+        part["face_slots"] = None
+    return {"ok": True}
