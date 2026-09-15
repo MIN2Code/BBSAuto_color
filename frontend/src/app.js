@@ -112,10 +112,16 @@ async function uploadImages(files) {
     toast(`「${f.name}」提取到 ${j.palette.length} 个主色`);
     if (j.region_pending) pollRegionReady(state.imageIndex);
   }
+  updateActionButtons();
+}
+
+// 取色类按钮统一启用条件：有渲染图（转台先验）且有模型件
+function updateActionButtons() {
+  const ready = state.imageUrl && state.session.parts.length > 0;
   $('alignmode').disabled = !state.imageUrl;
   $('project').disabled = !state.imageUrl;
-  $('autocolor').disabled = !(state.imageUrl && state.session.parts.length);
-  $('phase2collect').disabled = !(state.imageUrl && state.session.parts.length);
+  $('autocolor').disabled = !ready;
+  $('phase2collect').disabled = !ready;
 }
 
 // SAM2 后台分割完成提示：投影将自动切到区域模式（更稳的色块+更全的细节）
@@ -866,9 +872,8 @@ init.then((sid) => { state.sid = sid; return refreshSession(); }).then(async () 
   if (state.session.has_image) {
     state.imageUrl = `/api/sessions/${state.sid}/image.png`;
     $('imgname').textContent = state.session.image_name || '渲染图';
-    $('alignmode').disabled = false;
-    $('project').disabled = false;
   }
+  updateActionButtons();
   const palHex = state.session.palette_colors
     || state.session.palette.map((c) => c.hex);
   for (const p of state.session.parts) {

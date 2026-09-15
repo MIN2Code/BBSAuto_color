@@ -6,7 +6,7 @@ from typing import Any, Iterable, Mapping
 
 import numpy as np
 
-from backend.colorize import lab_hex, srgb8_to_lab, trimmed_median, weighted_median
+from backend.colorize import lab_hex, srgb8_to_lab, weighted_median
 from backend.mesh_edges import build_face_adjacency, grow_region
 from backend.meshpack import face_geometry
 
@@ -41,6 +41,7 @@ class CandidateRegion:
 _DEPTH_REL_TOLERANCE = 0.01
 _DEPTH_ABS_TOLERANCE = 0.02
 _SAMPLE_RADIUS = 2
+_FACE_CHUNK = 65536        # 面分块：限制 (F, 25) 邻域数组的峰值内存
 
 
 def collect_face_candidates(
@@ -82,35 +83,67 @@ def collect_face_candidates(
             depth = None
 
         camera = _view_value(view, "camera")
-        projected, face_depth = _project_centroids(centroids, normals, camera, width, height)
+        xs, ys, face_depth, gate = _project_visible(
+            centroids, normals, camera, width, height)
         part_id = _part_id(part)
-        for face_index, ((px, py), expected_depth) in enumerate(zip(projected, face_depth)):
-            if px is None or not _is_front_facing(centroids[face_index], normals[face_index], camera):
-                continue
-            x, y = int(round(px)), int(round(py))
-            if not (0 <= x < width and 0 <= y < height):
-                continue
-            if ids[y, x] != part_id:
-                continue
-            if depth is not None and not _depth_matches(depth[y, x], expected_depth):
-                continue
+        gate &= ids[ys, xs] == part_id
+        if depth is not None:
+            tol = np.maximum(_DEPTH_ABS_TOLERANCE,
+                             np.abs(face_depth) * _DEPTH_REL_TOLERANCE)
+            gate &= np.abs(depth[ys, xs] - face_depth) <= tol
 
-            pixels, valid = _sample_neighborhood(
-                image, ids, depth, x, y, part_id, expected_depth
-            )
-            if pixels.size == 0:
+        face_ids = np.flatnonzero(gate)
+        if not len(face_ids):
+            continue
+        offs = np.arange(-_SAMPLE_RADIUS, _SAMPLE_RADIUS + 1)
+        dy = np.repeat(offs, len(offs))
+        dx = np.tile(offs, len(offs))
+        denom = float(len(offs) ** 2)
+        for start in range(0, len(face_ids), _FACE_CHUNK):
+            block = face_ids[start:start + _FACE_CHUNK]
+            ys_n = ys[block][:, None] + dy[None, :]
+            xs_n = xs[block][:, None] + dx[None, :]
+            inside = ((ys_n >= 0) & (ys_n < height)
+                      & (xs_n >= 0) & (xs_n < width))
+            ys_c = np.clip(ys_n, 0, height - 1)
+            xs_c = np.clip(xs_n, 0, width - 1)
+            valid = inside & (ids[ys_c, xs_c] == part_id)
+            if depth is not None:
+                tol_n = np.maximum(
+                    _DEPTH_ABS_TOLERANCE,
+                    np.abs(face_depth[block])[:, None] * _DEPTH_REL_TOLERANCE)
+                valid &= np.abs(depth[ys_c, xs_c] - face_depth[block][:, None]) <= tol_n
+
+            flat = image[ys_c, xs_c].reshape(-1, 3)
+            lab = (srgb8_to_lab(flat).reshape(ys_n.shape + (3,)).astype(float))
+            lab = np.where(valid[..., None], lab, np.nan)
+            counts = valid.sum(axis=1)
+            ok = counts > 0
+            if not ok.any():
                 continue
-            lab_pixels = srgb8_to_lab(pixels)
-            lab = trimmed_median(lab_pixels)
-            visibility = float(valid / ((2 * _SAMPLE_RADIUS + 1) ** 2))
-            candidates[face_index].append(
-                FaceEvidence(
-                    view_index=view_index,
-                    lab=tuple(float(value) for value in lab),
-                    visibility=visibility,
-                    pixel_count=int(pixels.shape[0]),
-                )
-            )
+            sub = lab[ok]
+            med = np.nanmedian(sub, axis=1)
+            dist = np.sqrt(((sub - med[:, None, :]) ** 2).sum(axis=2))
+            # 80% 截尾阈值：np.nanquantile 逐行走 Python 太慢，改顺序统计
+            # （NaN→inf 后按行排序，取第 ceil(0.8·(n-1)) 个有序值）
+            counts_ok = valid[ok]
+            dist_f = np.where(np.isfinite(dist), dist, np.inf)
+            order = np.argsort(dist_f, axis=1)
+            q_idx = np.ceil(0.8 * (counts_ok.sum(axis=1) - 1)).astype(np.int64)
+            q = np.take_along_axis(dist_f, order, axis=1)[np.arange(len(q_idx)), q_idx]
+            keep = dist <= q[:, None]
+            kept = np.where(keep[..., None], sub, np.nan)
+            trimmed = np.where(
+                np.isfinite(kept).any(axis=1), np.nanmedian(kept, axis=1), med)
+
+            for local, lab_value, pixel_count in zip(np.flatnonzero(ok), trimmed, counts[ok]):
+                candidates[int(block[local])].append(
+                    FaceEvidence(
+                        view_index=view_index,
+                        lab=tuple(float(v) for v in lab_value),
+                        visibility=float(pixel_count) / denom,
+                        pixel_count=int(pixel_count),
+                    ))
 
     return candidates
 
@@ -286,7 +319,12 @@ def _camera_vectors(camera: Mapping[str, Any]):
     return eye, forward, right, up_vector
 
 
-def _project_centroids(centroids, normals, camera, image_width=None, image_height=None):
+def _project_visible(centroids, normals, camera, image_width, image_height):
+    """向量化投影：返回像素坐标（越界安全整型）、前方深度与可见门控。
+
+    门控 = 相机前方 + 正面朝向 + 帧内 + 坐标有限。像素坐标已按帧界裁剪，
+    调用方可用它们安全索引缓冲后再收紧门控。
+    """
     eye, forward, right, up = _camera_vectors(camera)
     fov = float(camera["fov"])
     viewport_width = float(camera.get("w", camera.get("width")))
@@ -295,56 +333,32 @@ def _project_centroids(centroids, normals, camera, image_width=None, image_heigh
     tangent = np.tan(np.radians(fov / 2.0))
     relative = centroids - eye
     depth = relative @ forward
-    x = relative @ right
-    y = relative @ up
-    ndc_x = (x / depth) / (tangent * aspect)
-    ndc_y = (y / depth) / tangent
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ndc_x = ((relative @ right) / depth) / (tangent * aspect)
+        ndc_y = ((relative @ up) / depth) / tangent
 
     # 渲染图以 object-fit:cover 显示在视口内（前端叠加层与 app.js drawImage 同
     # 语义）：图像等比放大至盖满视口、居中裁边。投影点先落到视口坐标，再逆
     # cover 映射回渲染图原始像素。纵横比一致时退化为纯等比缩放（与转台链路
     # 中前端按图像纵横比渲染 ID 缓冲的情形一致）。
-    image_width = float(camera.get("image_width", image_width or viewport_width))
-    image_height = float(camera.get("image_height", image_height or viewport_height))
-    scale = max(viewport_width / image_width, viewport_height / image_height)
-    offset_x = (viewport_width - image_width * scale) / 2.0
-    offset_y = (viewport_height - image_height * scale) / 2.0
+    mapped_w = float(camera.get("image_width", image_width or viewport_width))
+    mapped_h = float(camera.get("image_height", image_height or viewport_height))
+    scale = max(viewport_width / mapped_w, viewport_height / mapped_h)
+    offset_x = (viewport_width - mapped_w * scale) / 2.0
+    offset_y = (viewport_height - mapped_h * scale) / 2.0
     px = ((ndc_x * 0.5 + 0.5) * viewport_width - offset_x) / scale
     py = ((1.0 - (ndc_y * 0.5 + 0.5)) * viewport_height - offset_y) / scale
 
-    projected = []
-    for x_value, y_value, depth_value in zip(px, py, depth):
-        if depth_value <= 0:
-            projected.append((None, None))
-        else:
-            projected.append((float(x_value), float(y_value)))
-    return projected, depth
+    # NaN/inf 先归一到界外值，再取整裁剪：保证 ys/xs 恒为合法索引
+    safe_px = np.nan_to_num(px, nan=-1.0, posinf=-1.0, neginf=-1.0)
+    safe_py = np.nan_to_num(py, nan=-1.0, posinf=-1.0, neginf=-1.0)
+    xs = np.clip(np.rint(safe_px).astype(np.int64), 0, int(image_width) - 1)
+    ys = np.clip(np.rint(safe_py).astype(np.int64), 0, int(image_height) - 1)
 
-
-def _is_front_facing(centroid, normal, camera) -> bool:
-    eye = np.asarray(camera["eye"], dtype=float)
-    return float(np.dot(normal, eye - centroid)) > 0.0
-
-
-def _depth_matches(observed: float, expected: float) -> bool:
-    if not np.isfinite(observed) or not np.isfinite(expected):
-        return False
-    tolerance = max(_DEPTH_ABS_TOLERANCE, abs(expected) * _DEPTH_REL_TOLERANCE)
-    return abs(float(observed) - float(expected)) <= tolerance
-
-
-def _sample_neighborhood(image, ids, depth, x, y, part_id, expected_depth):
-    height, width = image.shape[:2]
-    rows = []
-    valid = 0
-    for row in range(max(0, y - _SAMPLE_RADIUS), min(height, y + _SAMPLE_RADIUS + 1)):
-        for col in range(max(0, x - _SAMPLE_RADIUS), min(width, x + _SAMPLE_RADIUS + 1)):
-            if ids[row, col] != part_id:
-                continue
-            if depth is not None and not _depth_matches(depth[row, col], expected_depth):
-                continue
-            rows.append(image[row, col])
-            valid += 1
-    if not rows:
-        return np.empty((0, 3), dtype=image.dtype), 0
-    return np.asarray(rows), valid
+    gate = (
+        (depth > 0)
+        & (safe_px >= 0) & (safe_px < mapped_w)
+        & (safe_py >= 0) & (safe_py < mapped_h)
+    )
+    gate &= np.einsum("ij,ij->i", normals, eye - centroids) > 0.0
+    return xs, ys, depth, gate
