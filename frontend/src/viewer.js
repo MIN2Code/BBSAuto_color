@@ -330,6 +330,34 @@ export class Viewer {
     this.invalidate();
   }
 
+  /** 只读候选预览：临时 color attribute 仅前端生效，不触碰后端 face_slots。 */
+  previewFaceRegion(idx, faceIndices, hex, partColor) {
+    const m = this.meshes.find((x) => x.userData.partIndex === idx);
+    if (!m) return;
+    const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry;
+    if (m.geometry !== g) { m.geometry.dispose(); m.geometry = g; }
+    const pos = g.getAttribute('position');
+    const col = new Float32Array(pos.count * 3);
+    const base = new THREE.Color(partColor || '#8a939e');
+    const tint = new THREE.Color(hex);
+    const hit = new Set(faceIndices);
+    const faceCount = pos.count / 3;
+    for (let fi = 0; fi < faceCount; fi++) {
+      const c = hit.has(fi) ? tint : base;
+      for (let k = 0; k < 3; k++) {
+        col[fi * 9 + k * 3] = c.r;
+        col[fi * 9 + k * 3 + 1] = c.g;
+        col[fi * 9 + k * 3 + 2] = c.b;
+      }
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    g.computeVertexNormals();
+    m.material.vertexColors = true;
+    m.material.color.set('#ffffff');   // 顶点色与材质色相乘：置白让顶点色独立表达
+    m.material.needsUpdate = true;
+    this.invalidate();
+  }
+
   /** 件内逐面上色：slots[i]=槽号（0=未涂→件色），paletteHex 为色板色。 */
   setFaceColors(idx, slots, paletteHex, partColor) {
     const m = this.meshes.find((x) => x.userData.partIndex === idx);

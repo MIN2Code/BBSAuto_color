@@ -115,6 +115,7 @@ async function uploadImages(files) {
   $('alignmode').disabled = !state.imageUrl;
   $('project').disabled = !state.imageUrl;
   $('autocolor').disabled = !(state.imageUrl && state.session.parts.length);
+  $('phase2collect').disabled = !(state.imageUrl && state.session.parts.length);
 }
 
 // SAM2 后台分割完成提示：投影将自动切到区域模式（更稳的色块+更全的细节）
@@ -507,6 +508,82 @@ $('autocolor').addEventListener('click', async () => {
     toast(`转台取色失败：${e.message}`, 6000);
   }
 });
+
+// ------------------------------------------------------------ 二期：件内候选
+$('phase2collect').addEventListener('click', async () => {
+  if (!state.session.parts.length) { toast('先导入模型件'); return; }
+  const nViews = state.session.image_count || state.imageCount || 0;
+  if (!nViews) { toast('先上传渲染图'); return; }
+  try {
+    if (!state.pose) {
+      toast('转台拟合中（候选收集前置）…', 12000);
+      state.pose = await fitTurntable(nViews);
+    }
+    // 每视角相机参数（服务端不存相机）：转台相机 + dx/dy 构图偏移后的真实视线
+    const cameras = [];
+    for (let i = 0; i < nViews; i++) {
+      const cam = turntableCamera(state.pose, i);
+      const dir = new THREE.Vector3();
+      cam.getWorldDirection(dir);
+      const target = cam.position.clone().addScaledVector(dir, state.pose.dist);
+      cameras.push({ eye: cam.position.toArray(), target: target.toArray(),
+                     up: cam.up.toArray(), fov: state.pose.fov });
+    }
+    toast('候选收集中（多视角证据 → 聚类 → 按边缘生长）…', 12000);
+    await api(`/api/sessions/${state.sid}/phase2/collect`,
+              { method: 'POST', body: JSON.stringify({ cameras }),
+                headers: { 'Content-Type': 'application/json' } });
+    await renderPhase2Summary();
+  } catch (e) {
+    toast(`候选收集失败：${e.message}`, 6000);
+  }
+});
+
+async function renderPhase2Summary() {
+  const box = $('phase2summary');
+  const j = await api(`/api/sessions/${state.sid}/phase2`);
+  if (j.status === 'failed') { box.innerHTML = `<span class="hint">候选收集失败：${j.error || ''}</span>`; return; }
+  if (j.status !== 'ready') { box.innerHTML = ''; return; }
+  const rows = [];
+  for (const p of j.parts) {
+    const regions = [...p.regions].sort((a, b) =>
+      (b.accepted - a.accepted) || (b.confidence - a.confidence));
+    for (const r of regions) {
+      const st = r.accepted ? '已接受' : '需复核';
+      rows.push(`<div class="row" data-part="${p.index}" data-faces="${r.faces.join(',')}"
+        data-hex="${r.color_hex}" style="align-items:center;gap:8px;cursor:pointer;margin-top:4px"
+        title="点击预览/取消（只读预览，不改件色）">
+        <span style="display:inline-block;width:14px;height:14px;border:1px solid #888;background:${r.color_hex}"></span>
+        <span>${p.name}</span>
+        <span class="hint">${r.faces.length} 面 · ${r.support_views} 视角 · 置信 ${r.confidence.toFixed(2)}</span>
+        <span class="hint">${st}</span></div>`);
+    }
+  }
+  box.innerHTML = rows.length
+    ? `<div class="hint">件内候选 ${rows.length} 条（${j.summary.accepted} 条已接受）；点击行预览色块位置</div>` + rows.join('')
+    : '<div class="hint">未发现件内候选区域（装饰可能已独立分件，或对比度不足）</div>';
+  for (const el of box.querySelectorAll('[data-part]')) {
+    el.addEventListener('click', () => {
+      const pi = Number(el.dataset.part);
+      const faces = el.dataset.faces ? el.dataset.faces.split(',').map(Number) : [];
+      if (el.dataset.on) {                        // 再次点击取消预览
+        delete el.dataset.on;
+        el.style.outline = '';
+        const p = state.session.parts.find((x) => x.index === pi);
+        viewer.clearFaceColors(pi, p ? p.color : undefined);
+        return;
+      }
+      for (const other of box.querySelectorAll('[data-on]')) {   // 单预览
+        delete other.dataset.on;
+        other.style.outline = '';
+      }
+      el.dataset.on = '1';
+      el.style.outline = '1px solid #4cd964';
+      const p = state.session.parts.find((x) => x.index === pi);
+      viewer.previewFaceRegion(pi, faces, el.dataset.hex, p ? p.color : undefined);
+    });
+  }
+}
 
 async function projectPaint(imageIndex) {
   $('project').addEventListener = $('project').addEventListener; // no-op

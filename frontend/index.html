@@ -65,6 +65,11 @@ h2 { font-size:13px; margin:0 0 8px; color:var(--accent); text-transform:upperca
         <span class="hint" id="autocolorhint">多张转台图一次全局对齐，逐件取色</span>
       </div>
       <div class="row" style="margin-top:8px">
+        <button class="btn" id="phase2collect" disabled title="件内候选区域发现：收集多视角面级颜色证据 → 按边缘生长 → 统一裁决。只出候选摘要与只读预览，不改件色">发现件内颜色</button>
+        <span class="hint">不拆件装饰/眼睛等件内多色候选</span>
+      </div>
+      <div id="phase2summary" aria-live="polite" style="margin-top:8px"></div>
+      <div class="row" style="margin-top:8px">
         <button class="btn" id="alignmode" disabled title="渲染图半透明叠加到视口，旋转模型对齐图中姿态">对齐投影</button>
         <button class="btn primary" id="project" disabled title="按当前视角把渲染图颜色投影到面向相机的表面">投影上色</button>
       </div>
