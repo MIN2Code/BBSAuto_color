@@ -550,15 +550,30 @@ def _phase2_region_json(region, part_index: int) -> dict:
             "reason": region.reason, "slot": region.slot}
 
 
+_FACE_SLOT_MAX = 255      # face_slots 为 uint8 槽编码；Bambu paint_color 更只认前 16 槽
+
+
 def _phase2_slot_of(sess: dict, hex_color: str) -> int:
-    """区域色/人工色入二期色表（1-based 槽号，与 face_slots 编码一致）。"""
+    """区域色/人工色入二期色表（1-based 槽号，与 face_slots 编码一致）。
+
+    槽表满 255 后新色吸附到 Lab 距离最近的既有槽（uint8 硬上限；实际可打印
+    数还受切片器耗材槽数约束，超出的槽由用户在切片软件里取舍）。
+    """
     pal = sess.setdefault("phase2_palette", [])
     h = (hex_color or "").upper()
     if not h.startswith("#") or len(h) != 7:
         return 0
-    if h not in pal:
+    if h in pal:
+        return pal.index(h) + 1
+    if len(pal) < _FACE_SLOT_MAX:
         pal.append(h)
-    return pal.index(h) + 1
+        return len(pal)
+    target = colorize.srgb8_to_lab(_hex_rgb(h))[0]
+    labs = colorize.srgb8_to_lab(np.array(
+        [[int(c[1:3], 16), int(c[3:5], 16), int(c[5:7], 16)] for c in pal],
+        dtype=np.uint8))
+    nearest = int(np.argmin(np.linalg.norm(labs - target, axis=1)))
+    return nearest + 1
 
 
 def _hex_rgb(hex_color: str) -> np.ndarray:

@@ -213,3 +213,16 @@ def test_clear_auto_keeps_manual_overrides(client, phase2_session):
     sess = meshpack.get_session(phase2_session)
     assert sess["phase2_regions"] == []
     assert sess["face_overrides"]
+
+
+def test_phase2_slot_snaps_when_palette_full():
+    from backend.api.routes import _phase2_slot_of
+
+    sess = {"phase2_palette": []}
+    for i in range(255):
+        assert _phase2_slot_of(sess, f"#{i:02X}0000") == i + 1
+    assert len(sess["phase2_palette"]) == 255
+    # 槽表满：新色吸附最近既有槽，槽号保持 uint8 合法域
+    s = _phase2_slot_of(sess, "#FE0101")
+    assert 1 <= s <= 255
+    assert _phase2_slot_of(sess, "bad") == 0

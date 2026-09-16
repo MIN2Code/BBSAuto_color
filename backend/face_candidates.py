@@ -257,12 +257,13 @@ def apply_face_layers(
     """Compose per-face slots: base -> accepted regions -> manual overrides."""
     slots = np.asarray(base_slots, dtype=np.uint8).copy()
     for region in accepted_regions:
-        if not region.accepted or region.slot == 0:
+        if not region.accepted or not 1 <= region.slot <= 255:
             continue
         for face in region.faces:
             slots[face] = region.slot
     for face, slot in face_overrides.items():
-        slots[int(face)] = int(slot)
+        if 1 <= int(slot) <= 255:
+            slots[int(face)] = int(slot)
     return slots
 
 
