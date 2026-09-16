@@ -7,7 +7,7 @@ from typing import Any, Iterable, Mapping
 import numpy as np
 
 from backend.colorize import lab_hex, srgb8_to_lab, weighted_median
-from backend.mesh_edges import build_face_adjacency, grow_region
+from backend.mesh_edges import build_face_adjacency, grow_region, vertex_weld_map
 from backend.meshpack import face_geometry
 
 _REGION_PIX_FULL = 400        # 可见像素满置信预算（≈20×20 色块）
@@ -164,7 +164,9 @@ def discover_regions(
     is decided later by ``decide_regions``.
     """
     centroids, normals = face_geometry(part)
-    adjacency = build_face_adjacency(np.asarray(part["faces"]))
+    # STL 面片汤：先按坐标焊接顶点，共享边在焊接后的索引层面才存在
+    weld = vertex_weld_map(part["vertices"])
+    adjacency = build_face_adjacency(weld[np.asarray(part["faces"], dtype=np.int64)])
     face_count = len(adjacency)
 
     base = np.asarray(base_lab, dtype=float)

@@ -579,6 +579,7 @@ def phase2_collect(sid: str, body: dict = None):
         raise HTTPException(409, "二期候选收集需要渲染图、ID 缓冲与每视角相机参数（先完成转台拟合采集）")
 
     sess["phase2_status"] = "collecting"
+    sess["phase2_cameras"] = cameras       # 诊断留存：最近一次收集使用的相机
     try:
         views = []
         for i in range(len(images)):
@@ -596,15 +597,25 @@ def phase2_collect(sid: str, body: dict = None):
             views.append({"camera": cam, "image": img, "id_buffer": idb, "depth": None})
 
         all_regions = []
+        _dbg = {"views": len(views)}
         for pi, part in enumerate(sess["parts"]):
             evidence = collect_face_candidates({**part, "index": pi}, views,
                                                part.get("color") or "#FFFFFF")
             base_lab = tuple(float(v) for v in colorize.srgb8_to_lab(
                 _hex_rgb(part.get("color") or "#FFFFFF"))[0])
             regions = decide_regions(discover_regions(part, evidence, base_lab))
+            if pi == 0:
+                hits = sum(len(v) for v in evidence.values())
+                des = [np.linalg.norm(np.array(next(iter(v)).lab) - base_lab)
+                       for v in evidence.values() if v]
+                _dbg.update(part0_hits=hits,
+                            part0_ge10=int(sum(1 for d in des if d >= 10)) if des else 0,
+                            part0_regions=len(regions),
+                            part0_color=part.get("color"))
             all_regions.extend(_phase2_region_json(r, pi) for r in regions)
         sess["phase2_regions"] = all_regions
         sess["phase2_status"] = "ready"
+        sess["phase2_debug"] = _dbg
         sess.pop("phase2_error", None)
     except HTTPException:
         sess["phase2_status"] = "failed"
@@ -626,6 +637,7 @@ def phase2_get(sid: str):
     accepted = sum(1 for r in regions if r.get("accepted"))
     return {"status": sess.get("phase2_status", "idle"),
             "error": sess.get("phase2_error"),
+            "debug": sess.get("phase2_debug"),
             "palette": sess.get("phase2_palette") or [],
             "parts": [{"index": pi, "name": p.get("name"), "color": p.get("color"),
                        "flagged": p.get("flagged", False),

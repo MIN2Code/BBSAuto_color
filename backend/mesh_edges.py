@@ -6,6 +6,21 @@ from collections import defaultdict, deque
 import numpy as np
 
 
+def vertex_weld_map(vertices: np.ndarray) -> np.ndarray:
+    """Return remap[i]: canonical index of vertex i, merging by exact position.
+
+    STL 是三角面片汤（每个三角形自带顶点副本，process=False 不合并），
+    顶点索引层面的"共享边"不存在。导出器写出的同一位置顶点是位级相同的
+    float32 → 转 float64 后按精确相等焊接即可，无需容差。
+    """
+    v = np.ascontiguousarray(np.asarray(vertices, dtype=np.float64))
+    if v.ndim != 2 or v.shape[1] != 3:
+        raise ValueError("vertices must have shape (N, 3)")
+    view = v.view(dtype=[("x", np.float64), ("y", np.float64), ("z", np.float64)]).ravel()
+    _, _, inverse = np.unique(view, return_index=True, return_inverse=True)
+    return np.asarray(inverse, dtype=np.int64)
+
+
 def build_face_adjacency(faces: np.ndarray) -> list[list[int]]:
     """Return face indices sharing an undirected mesh edge.
 
