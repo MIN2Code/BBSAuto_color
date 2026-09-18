@@ -570,50 +570,144 @@ async function loadPhase2Preview() {
   if (after.revision !== rev) await loadPhase2Preview();
 }
 
+function phase2ControlsReady(on) {
+  for (const id of ['phase2clear', 'viewfull', 'viewpart', 'viewslots']) $(id).disabled = !on;
+}
+
+// 视图模式：full=完整颜色（连续 RGB 预览）/ part=件级颜色 / slots=打印槽（face_slots）
+async function setViewMode(mode) {
+  state.viewMode = mode;
+  for (const [id, m] of [['viewfull', 'full'], ['viewpart', 'part'], ['viewslots', 'slots']])
+    $(id).classList.toggle('primary', m === mode);
+  for (const p of state.session.parts) {
+    if (mode === 'part') { viewer.clearFaceColors(p.index, p.color); continue; }
+    if (mode === 'full') {
+      const buf = state.previewRGB && state.previewRGB[p.index];
+      if (buf) viewer.setFaceRGB(p.index, buf);
+      else viewer.clearFaceColors(p.index, p.color);
+      continue;
+    }
+    try {                                     // slots：后端 face_slots 权威
+      const fc = await fetch(`/api/sessions/${state.sid}/facecolors/${p.index}`).then((x) => x.json());
+      let slots = null;
+      if (fc.slots_b64) {
+        const bin = atob(fc.slots_b64);
+        slots = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) slots[i] = bin.charCodeAt(i);
+      }
+      if (slots && slots.some((x) => x))
+        viewer.setFaceColors(p.index, slots, state.phase2Palette || [], p.color);
+      else viewer.clearFaceColors(p.index, p.color);
+    } catch { viewer.clearFaceColors(p.index, p.color); }
+  }
+}
+
+// 摘要按件折叠：顶层=件级统计行（点击展开），展开后分页 50 条/页。
+// 区域点击=临时高亮；取消时恢复完整预览（而非件色），与视图模式语义一致。
 async function renderPhase2Summary() {
   const box = $('phase2summary');
   const j = await api(`/api/sessions/${state.sid}/phase2`);
-  if (j.status === 'failed') { box.innerHTML = `<span class="hint">候选收集失败：${j.error || ''}</span>`; return; }
-  if (j.status !== 'ready') { box.innerHTML = ''; return; }
+  state.phase2Parts = j.parts || [];
+  state.phase2Palette = j.palette || [];
+  state.phase2Expanded = state.phase2Expanded || {};
+  if (j.status === 'failed') {
+    box.innerHTML = `<span class="hint">候选收集失败：${j.error || ''}</span>`;
+    phase2ControlsReady(true);
+    return;
+  }
+  if (j.status !== 'ready') { box.innerHTML = ''; phase2ControlsReady(false); return; }
+  phase2ControlsReady(true);
+  if (!state.viewMode) state.viewMode = 'full';
   const rows = [];
-  for (const p of j.parts) {
-    const regions = [...p.regions].sort((a, b) =>
+  for (const p of state.phase2Parts) {
+    if (!p.regions.length) continue;
+    const acc = p.regions.filter((r) => r.accepted).length;
+    const swatch = (p.regions.find((r) => r.accepted) || p.regions[0]).color_hex;
+    const open = state.phase2Expanded[p.index] !== undefined;
+    rows.push(`<div class="row" data-partrow="${p.index}" style="align-items:center;gap:8px;cursor:pointer;margin-top:4px">
+      <span style="display:inline-block;width:14px;height:14px;border:1px solid #888;background:${swatch}"></span>
+      <span>${p.name}</span>
+      <span class="hint">${p.regions.length} 候选 · ${acc} 接受 · ${p.regions.length - acc} 待复核</span>
+      <span class="hint">${open ? '收起' : '展开'}</span></div>`);
+    if (!open) continue;
+    const page = state.phase2Expanded[p.index];
+    const sorted = [...p.regions].sort((a, b) =>
       (b.accepted - a.accepted) || (b.confidence - a.confidence));
-    for (const r of regions) {
-      const st = r.accepted ? '已接受' : '需复核';
+    const pages = Math.ceil(sorted.length / 50);
+    for (const r of sorted.slice(page * 50, page * 50 + 50)) {
       rows.push(`<div class="row" data-part="${p.index}" data-faces="${r.faces.join(',')}"
-        data-hex="${r.color_hex}" style="align-items:center;gap:8px;cursor:pointer;margin-top:4px"
-        title="点击预览/取消（只读预览，不改件色）">
-        <span style="display:inline-block;width:14px;height:14px;border:1px solid #888;background:${r.color_hex}"></span>
-        <span>${p.name}</span>
-        <span class="hint">${r.faces.length} 面 · ${r.support_views} 视角 · 置信 ${r.confidence.toFixed(2)}</span>
-        <span class="hint">${st}</span></div>`);
+        data-hex="${r.color_hex}" style="align-items:center;gap:8px;cursor:pointer;margin-top:2px;padding-left:20px"
+        title="点击临时高亮/取消">
+        <span style="display:inline-block;width:12px;height:12px;border:1px solid #888;background:${r.color_hex}"></span>
+        <span class="hint">${r.faces.length} 面 · ${r.support_views} 视角 · 置信 ${r.confidence.toFixed(2)} · ${r.accepted ? '已接受' : '需复核'}</span></div>`);
+    }
+    if (pages > 1) {
+      rows.push(`<div class="row" style="gap:8px;padding-left:20px;margin-top:2px">
+        <button class="btn" data-page="${p.index}:${page - 1}" ${page === 0 ? 'disabled' : ''}>上一页</button>
+        <span class="hint">${page + 1}/${pages}</span>
+        <button class="btn" data-page="${p.index}:${page + 1}" ${page >= pages - 1 ? 'disabled' : ''}>下一页</button></div>`);
     }
   }
   box.innerHTML = rows.length
-    ? `<div class="hint">件内候选 ${rows.length} 条（${j.summary.accepted} 条已接受）；点击行预览色块位置</div>` + rows.join('')
+    ? `<div class="hint">件内候选 ${j.summary.regions} 条（${j.summary.accepted} 已接受）；点击件展开，点击区域临时高亮</div>` + rows.join('')
     : '<div class="hint">未发现件内候选区域（装饰可能已独立分件，或对比度不足）</div>';
+  for (const el of box.querySelectorAll('[data-partrow]')) {
+    el.addEventListener('click', () => {
+      const pi = Number(el.dataset.partrow);
+      if (state.phase2Expanded[pi] !== undefined) delete state.phase2Expanded[pi];
+      else state.phase2Expanded[pi] = 0;
+      renderPhase2Summary();
+    });
+  }
+  for (const el of box.querySelectorAll('[data-page]')) {
+    el.addEventListener('click', () => {
+      const [pi, page] = el.dataset.page.split(':').map(Number);
+      state.phase2Expanded[pi] = page;
+      renderPhase2Summary();
+    });
+  }
   for (const el of box.querySelectorAll('[data-part]')) {
     el.addEventListener('click', () => {
       const pi = Number(el.dataset.part);
       const faces = el.dataset.faces ? el.dataset.faces.split(',').map(Number) : [];
-      if (el.dataset.on) {                        // 再次点击取消预览
+      const p = state.session.parts.find((x) => x.index === pi);
+      if (el.dataset.on) {                      // 取消高亮 → 恢复完整预览
         delete el.dataset.on;
         el.style.outline = '';
-        const p = state.session.parts.find((x) => x.index === pi);
-        viewer.clearFaceColors(pi, p ? p.color : undefined);
+        const buf = state.previewRGB && state.previewRGB[pi];
+        if (buf) viewer.setFaceRGB(pi, buf);
+        else viewer.clearFaceColors(pi, p ? p.color : undefined);
         return;
       }
-      for (const other of box.querySelectorAll('[data-on]')) {   // 单预览
+      for (const other of box.querySelectorAll('[data-on]')) {   // 单高亮
         delete other.dataset.on;
         other.style.outline = '';
       }
       el.dataset.on = '1';
       el.style.outline = '1px solid #4cd964';
-      const p = state.session.parts.find((x) => x.index === pi);
       viewer.previewFaceRegion(pi, faces, el.dataset.hex, p ? p.color : undefined);
     });
   }
+}
+
+$('phase2clear').addEventListener('click', async () => {
+  try {
+    await api(`/api/sessions/${state.sid}/phase2/auto`, { method: 'DELETE' });
+    state.previewRGB = {};
+    state.phase2Parts = [];
+    state.phase2Expanded = {};
+    for (const p of state.session.parts) viewer.clearFaceColors(p.index, p.color);
+    $('phase2summary').innerHTML = '<div class="hint">已清除自动候选</div>';
+    phase2ControlsReady(false);
+    state.viewMode = 'part';
+    toast('已清除自动候选，恢复件级颜色');
+  } catch (e) {
+    toast(`清除失败：${e.message}`, 6000);
+  }
+});
+
+for (const [id, m] of [['viewfull', 'full'], ['viewpart', 'part'], ['viewslots', 'slots']]) {
+  $(id).addEventListener('click', () => setViewMode(m).catch((e) => toast(e.message, 6000)));
 }
 
 async function projectPaint(imageIndex) {
