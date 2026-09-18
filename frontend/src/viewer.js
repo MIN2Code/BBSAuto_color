@@ -330,6 +330,33 @@ export class Viewer {
     this.invalidate();
   }
 
+  /** 连续 RGB 完整预览：rgb 为每面 3 字节（faceCount*3），Uint8 归一化顶点色。
+   *  仅前端显示，不写后端 face_slots；颜色已覆盖全部分面，无需件色兜底。 */
+  setFaceRGB(idx, rgb) {
+    const m = this.meshes.find((x) => x.userData.partIndex === idx);
+    if (!m) return;
+    const g = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry;
+    if (m.geometry !== g) { m.geometry.dispose(); m.geometry = g; }
+    const pos = g.getAttribute('position');
+    const faceCount = Math.floor(pos.count / 3);
+    if (!rgb || rgb.length !== faceCount * 3) { console.warn('预览 RGB 长度不符', idx); return; }
+    const col = new Uint8Array(pos.count * 3);
+    for (let fi = 0; fi < faceCount; fi++) {
+      const r = rgb[fi * 3], gr = rgb[fi * 3 + 1], b = rgb[fi * 3 + 2];
+      for (let k = 0; k < 3; k++) {
+        col[fi * 9 + k * 3] = r;
+        col[fi * 9 + k * 3 + 1] = gr;
+        col[fi * 9 + k * 3 + 2] = b;
+      }
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3, true));
+    g.computeVertexNormals();
+    m.material.vertexColors = true;
+    m.material.color.set('#ffffff');   // 顶点色与材质色相乘：置白让顶点色独立表达
+    m.material.needsUpdate = true;
+    this.invalidate();
+  }
+
   /** 只读候选预览：临时 color attribute 仅前端生效，不触碰后端 face_slots。 */
   previewFaceRegion(idx, faceIndices, hex, partColor) {
     const m = this.meshes.find((x) => x.userData.partIndex === idx);

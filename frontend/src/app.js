@@ -540,10 +540,35 @@ $('phase2collect').addEventListener('click', async () => {
               { method: 'POST', body: JSON.stringify({ cameras }),
                 headers: { 'Content-Type': 'application/json' } });
     await renderPhase2Summary();
+    await loadPhase2Preview();          // 完整颜色视图：连续 RGB 自动上画
   } catch (e) {
     toast(`候选收集失败：${e.message}`, 6000);
   }
 });
+
+// 连续 RGB 完整预览：拉取每面 3 字节预览并展开为归一化 Uint8 顶点色。
+// 预览期间若 phase2_revision 变化（并发收集/清除），整体重拉一次。
+async function loadPhase2Preview() {
+  const j = await api(`/api/sessions/${state.sid}/phase2`);
+  if (j.status !== 'ready') return;
+  const rev = j.revision;
+  state.phase2Palette = j.palette || [];
+  state.previewRGB = {};
+  const targets = j.parts.filter((p) => p.regions.some((r) => r.accepted));
+  for (const p of targets) {
+    const r = await fetch(`/api/sessions/${state.sid}/phase2/preview/${p.index}`);
+    if (!r.ok) continue;
+    const buf = new Uint8Array(await r.arrayBuffer());
+    const mesh = window.__viewer.meshes.find((x) => x.userData.partIndex === p.index);
+    if (!mesh) continue;
+    const faces = Math.floor(mesh.geometry.getAttribute('position').count / 3);
+    if (buf.length !== faces * 3) { console.warn('预览字节数不匹配', p.index); continue; }
+    state.previewRGB[p.index] = buf;
+    viewer.setFaceRGB(p.index, buf);
+  }
+  const after = await api(`/api/sessions/${state.sid}/phase2`);
+  if (after.revision !== rev) await loadPhase2Preview();
+}
 
 async function renderPhase2Summary() {
   const box = $('phase2summary');
@@ -894,4 +919,13 @@ init.then((sid) => { state.sid = sid; return refreshSession(); }).then(async () 
   }
   viewer.frameAll();
   if (state.session.parts.length) toast(`已加载 ${state.session.parts.length} 件`);
+  // 二期状态恢复：候选已就绪 → 自动重建完整颜色预览与摘要（不依赖浏览器临时态）
+  try {
+    const j2 = await api(`/api/sessions/${state.sid}/phase2`);
+    if (j2.status === 'ready') {
+      $('phase2collect').disabled = false;
+      await renderPhase2Summary();
+      await loadPhase2Preview();
+    }
+  } catch { /* 无二期状态忽略 */ }
 }).catch((e) => toast(`初始化失败：${e.message}`));
