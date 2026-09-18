@@ -26,17 +26,6 @@ SAM_SCRIPT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__)))), "scripts", "sam_segment.py")
 
 
-def _sid(request: Request) -> str:
-    sid = request.query_params.get("sid") or request.headers.get("X-Session")
-    if not sid:
-        raise HTTPException(400, "缺少 sid")
-    try:
-        meshpack.get_session(sid)
-    except KeyError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    return sid
-
-
 @router.post("/sessions")
 def create_session():
     return {"session_id": meshpack.new_session()}
@@ -462,68 +451,6 @@ def project_paint(sid: str, body: dict):
                 out_item["painted"] = int((slots > 0).sum())
         out.append(out_item)
     return {"parts": out, "palette": pal_hex}
-
-
-@router.post("/sessions/{sid}/smooth/{part_index}")
-def smooth_faces(sid: str, part_index: int, body: dict = None):
-    """面级邻域多数投票平滑：孤立异色小岛被邻域主色吞并（消投影噪点/锯齿）。"""
-    sess = meshpack.get_session(sid)
-    if not (0 <= part_index < len(sess["parts"])):
-        raise HTTPException(404, "part not found")
-    p = sess["parts"][part_index]
-    slots = p.get("face_slots")
-    if not slots:
-        return {"ok": True, "changed": 0}
-    f = np.asarray(p["faces"], dtype=np.int64)
-    sl = np.asarray(slots, dtype=np.int64)
-    T = sl.shape[0]
-    rounds = int((body or {}).get("rounds", 2))
-    # 边邻接：每面 3 条有序边，同边的面互为邻居
-    edges = np.sort(np.concatenate([f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1)
-    uniq, inv = np.unique(edges, axis=0, return_inverse=True)
-    face_of_edge = np.repeat(np.arange(T), 3)
-    order = np.argsort(inv, kind="stable")
-    e_sorted = inv[order]
-    f_sorted = face_of_edge[order]
-    starts = np.flatnonzero(np.r_[True, e_sorted[1:] != e_sorted[:-1]])
-    sizes = np.diff(np.r_[starts, e_sorted.size])
-    shared = sizes >= 2                      # 两条以上面共享的边才有邻接
-    eid = np.repeat(np.arange(starts.size), sizes)[order.argsort()]   # 还原每面的边组号
-    # 邻接对
-    from collections import defaultdict
-    by_edge = defaultdict(list)
-    for k, ei in enumerate(e_sorted):
-        if shared[ei]:
-            by_edge[ei].append(f_sorted[k])
-    pairs_a, pairs_b = [], []
-    for lst in by_edge.values():
-        if len(lst) >= 2:
-            arr = np.array(lst)
-            for x in arr:
-                for y in arr:
-                    if x != y:
-                        pairs_a.append(x)
-                        pairs_b.append(y)
-    if not pairs_a:
-        return {"ok": True, "changed": 0}
-    pa = np.array(pairs_a)
-    pb = np.array(pairs_b)
-    changed_total = 0
-    for _ in range(max(1, rounds)):
-        hist = np.zeros((T, 18), dtype=np.int32)   # 槽号 0-17
-        np.add.at(hist, (pa, sl[pb]), 1)
-        np.add.at(hist, (pb, sl[pa]), 1)
-        own = hist[np.arange(T), sl]
-        best = hist.argmax(axis=1)
-        bestc = hist[np.arange(T), best]
-        # 孤立异色：本面槽的邻居支持 < 邻居最大支持 30% 且存在更强的不同色 → 换
-        swap = (bestc > own * 3) & (best != sl) & (bestc >= 3)
-        sl = np.where(swap, best, sl)
-        changed_total += int(swap.sum())
-    p["face_slots"] = sl.tolist()
-    import base64
-    b64 = base64.b64encode(np.asarray(sl, dtype=np.uint8).tobytes()).decode()
-    return {"ok": True, "changed": changed_total, "slots_b64": b64}
 
 
 @router.get("/sessions/{sid}/export.3mf")

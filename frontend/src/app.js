@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { Viewer } from './viewer.js?v=1';
 
 const $ = (id) => document.getElementById(id);
-const state = { sid: null, session: null, sel: -1, faceSlots: {}, imageUrl: null, align: false };
+const state = { sid: null, session: null, sel: -1, faceSlots: {}, imageAngle: {}, imageUrl: null, align: false };
 
 const viewer = new Viewer($('view'));
 window.__viewer = viewer;   // 调试/自动化可直接操控相机
@@ -711,7 +711,6 @@ for (const [id, m] of [['viewfull', 'full'], ['viewpart', 'part'], ['viewslots',
 }
 
 async function projectPaint(imageIndex) {
-  $('project').addEventListener = $('project').addEventListener; // no-op
   if (!state.session.parts.length) return;
   const cam = viewer.camera;
   const w = viewer.container.clientWidth, h = viewer.container.clientHeight;
