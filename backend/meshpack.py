@@ -24,6 +24,7 @@ def new_session() -> str:
                          "image_name": "", "image_pixels": None, "image_size": None,
                          "images": [],   # 多渲染图像素缓存（投影按 index 取用）
                          "phase2_status": "idle",  # 二期状态机 idle→collecting→deciding→ready/failed
+                         "phase2_revision": 0,     # 候选状态版本号：collect/clear/改色 +1，前端据此丢弃过期预览
                          "created": __import__("time").time()}
         # 会话数控制（自用）
         if len(SESSIONS) > 8:

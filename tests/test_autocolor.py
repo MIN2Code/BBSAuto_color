@@ -226,3 +226,57 @@ def test_phase2_slot_snaps_when_palette_full():
     s = _phase2_slot_of(sess, "#FE0101")
     assert 1 <= s <= 255
     assert _phase2_slot_of(sess, "bad") == 0
+
+
+def test_phase2_preview_returns_base_when_idle(client, ready_session):
+    from backend.api.routes import _hex_rgb
+    r = client.get(f"/api/sessions/{ready_session}/phase2/preview/0")
+    assert r.status_code == 200
+    faces = len(meshpack.get_session(ready_session)["parts"][0]["faces"])
+    assert len(r.content) == faces * 3
+    assert r.headers["X-Face-Count"] == str(faces)
+    assert int(r.headers["X-Phase2-Revision"]) >= 0
+    base = _hex_rgb("#FFFFFF")
+    assert r.content[0:3] == bytes(base[0].tolist())
+
+
+def test_phase2_preview_composes_accepted_regions(client, ready_session):
+    sess = meshpack.get_session(ready_session)
+    sess["phase2_regions"] = [
+        {"part_index": 0, "region_id": 0, "faces": [0, 1, 2, 3],
+         "color_hex": "#D22A1F", "support_views": 2, "confidence": 0.9,
+         "accepted": True, "reason": "accepted", "slot": 0}]
+    sess["phase2_status"] = "ready"
+    r = client.get(f"/api/sessions/{ready_session}/phase2/preview/0")
+    assert r.content[0:3] == bytes([0xD2, 0x2A, 0x1F])      # 面0 区域色
+    assert r.content[12:15] != bytes([0xD2, 0x2A, 0x1F])    # 面4 仍 base
+    assert all(p.get("face_slots") is None for p in sess["parts"])
+
+
+def test_phase2_preview_override_wins_and_clear_resets(client, ready_session):
+    sess = meshpack.get_session(ready_session)
+    sess["phase2_regions"] = [
+        {"part_index": 0, "region_id": 0, "faces": [1], "color_hex": "#D22A1F",
+         "support_views": 2, "confidence": 0.9, "accepted": True,
+         "reason": "accepted", "slot": 0}]
+    sess["phase2_status"] = "ready"
+    sess["face_overrides"] = {"0": {"1": "#2A46D2"}}
+    body = client.get(f"/api/sessions/{ready_session}/phase2/preview/0").content
+    assert body[3:6] == bytes([0x2A, 0x46, 0xD2])
+    client.delete(f"/api/sessions/{ready_session}/phase2/auto")
+    body2 = client.get(f"/api/sessions/{ready_session}/phase2/preview/0").content
+    assert body2[3:6] == bytes([0x2A, 0x46, 0xD2])   # 人工 face override 存活
+    assert body2[12:15] == bytes([0xFF, 0xFF, 0xFF])  # 其余面回 base 白
+
+
+def test_phase2_revision_increments_on_collect_and_clear(client, ready_session):
+    r0 = client.get(f"/api/sessions/{ready_session}/phase2").json()
+    base_rev = r0["revision"]
+    client.post(f"/api/sessions/{ready_session}/phase2/collect",
+                json={"cameras": [{"eye": [0, 0, 40], "target": [0, 0, 0],
+                                   "up": [0, 1, 0], "fov": 60}]})
+    r1 = client.get(f"/api/sessions/{ready_session}/phase2").json()
+    assert r1["revision"] > base_rev
+    client.delete(f"/api/sessions/{ready_session}/phase2/auto")
+    r2 = client.get(f"/api/sessions/{ready_session}/phase2").json()
+    assert r2["revision"] > r1["revision"]

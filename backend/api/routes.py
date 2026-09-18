@@ -318,6 +318,7 @@ async def set_part_color(sid: str, part_index: int, request: Request):
     # 人工改色 = override 持久层：重跑自动取色不冲掉
     sess = meshpack.get_session(sid)
     sess.setdefault("overrides", {})[str(part_index)] = color
+    sess["phase2_revision"] = sess.get("phase2_revision", 0) + 1   # base 色变 → 预览过期
     return {"ok": True, "color": sess["parts"][part_index]["color"]}
 
 
@@ -630,6 +631,7 @@ def phase2_collect(sid: str, body: dict = None):
             all_regions.extend(_phase2_region_json(r, pi) for r in regions)
         sess["phase2_regions"] = all_regions
         sess["phase2_status"] = "ready"
+        sess["phase2_revision"] = sess.get("phase2_revision", 0) + 1
         sess["phase2_debug"] = _dbg
         sess.pop("phase2_error", None)
     except HTTPException:
@@ -651,6 +653,7 @@ def phase2_get(sid: str):
     regions = sess.get("phase2_regions") or []
     accepted = sum(1 for r in regions if r.get("accepted"))
     return {"status": sess.get("phase2_status", "idle"),
+            "revision": sess.get("phase2_revision", 0),
             "error": sess.get("phase2_error"),
             "debug": sess.get("phase2_debug"),
             "palette": sess.get("phase2_palette") or [],
@@ -702,8 +705,43 @@ def phase2_clear(sid: str):
     sess = meshpack.get_session(sid)
     sess["phase2_regions"] = []
     sess["phase2_status"] = "idle"
+    sess["phase2_revision"] = sess.get("phase2_revision", 0) + 1
     sess["phase2_palette"] = []
     sess.pop("phase2_error", None)
     for part in sess["parts"]:
         part["face_slots"] = None
     return {"ok": True}
+
+
+@router.get("/sessions/{sid}/phase2/preview/{part_index}")
+def phase2_preview(sid: str, part_index: int):
+    """连续 RGB 面级预览：每面 3 字节（face_count*3），完整视觉预览专用。
+
+    合成序 = 件级 base → 已接受区域（稳定优先级先写者赢）→ 人工 face
+    override。不写 face_slots、不受耗材槽限制；idle 时返回纯 base 色。
+    """
+    from ..face_candidates import CandidateRegion, compose_face_rgb
+    sess = meshpack.get_session(sid)
+    if not (0 <= part_index < len(sess["parts"])):
+        raise HTTPException(404, "part not found")
+    part = sess["parts"][part_index]
+    accepted = []
+    for r in sess.get("phase2_regions") or []:
+        if r.get("part_index") != part_index or not r.get("accepted"):
+            continue
+        accepted.append(CandidateRegion(
+            region_id=int(r.get("region_id", 0)),
+            faces=frozenset(int(f) for f in r.get("faces") or []),
+            color_hex=r.get("color_hex", ""),
+            support_views=int(r.get("support_views", 0)),
+            confidence=float(r.get("confidence", 0.0)),
+            accepted=True, reason=r.get("reason", "")))
+    overrides = {int(f): h for f, h in
+                 ((sess.get("face_overrides") or {}).get(str(part_index)) or {}).items()}
+    rgb = compose_face_rgb(len(part["faces"]),
+                           part.get("color") or "#FFFFFF", accepted, overrides)
+    return Response(
+        content=rgb.tobytes(),
+        media_type="application/octet-stream",
+        headers={"X-Face-Count": str(len(part["faces"])),
+                 "X-Phase2-Revision": str(sess.get("phase2_revision", 0))})
