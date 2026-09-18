@@ -154,6 +154,7 @@ def recolor_session(sess: dict) -> list:
             per_part[pid - 1].append((trimmed_median(lab), int(m.sum())))
 
     overrides = sess.get("overrides") or {}
+    meds = [None] * n                             # 每件最佳估计 Lab（供同组回退）
     out = []
     for pi, pv in enumerate(per_part):
         p = parts[pi]
@@ -176,6 +177,7 @@ def recolor_session(sess: dict) -> list:
             labs_k = labs[bright]
             wts_k = wts[bright]
             med = weighted_median(labs_k, wts_k)
+            meds[pi] = med
             dE = np.sqrt(((labs - med) ** 2).sum(axis=1))
             pix_factor = min(1.0, pix_total / PIX_FULL)
             agree = max(0.0, 1.0 - float(dE.std()) / DISAGREE_DE)
@@ -188,12 +190,34 @@ def recolor_session(sess: dict) -> list:
                 item.update({"flagged": True, "reason": "views_disagree"})
                 if float(dE.std()) > DISAGREE_DE * 2.2:
                     # 跨视角严重不一致（典型：渲染图姿势≠STL装配姿势，如兜帽佩戴/
-                    # 垂落状态差；或严重遮挡）——本视角组取不到可信本色，
-                    # 不落色交人工（保留旧色），错误自信比无色更有害
-                    item.update({"hex": p.get("color") or "#8A939E",
-                                 "reason": "views_disagree_hard", "conf": 0.0})
+                    # 垂落状态差）——置信归零+旗帜交人工，但仍显示最佳估计色：
+                    # 错误自信比无色有害，而"明显错误的大面积默认灰"更不可用
+                    item.update({"reason": "views_disagree_hard", "conf": 0.0})
         if str(pi) in overrides:                  # override 持久层最后生效
             item.update({"hex": overrides[str(pi)], "override": True,
                          "flagged": False, "reason": ""})
         out.append(item)
+
+    # 同组回退：无证据件按前缀/左右对称分组借用可信组员的最佳估计色
+    # （作者切件 af1/af2、arm_l/arm_r 同色是强先验）。已有非默认灰旧色或
+    # override 的件不动；严重分歧件（views_disagree_hard）不作供体。
+    from .meshpack import _prefix
+    donors: dict[str, tuple[list, list]] = {}
+    for pi, item in enumerate(out):
+        if meds[pi] is not None and item["reason"] != "views_disagree_hard":
+            key = _prefix(parts[pi]["name"])
+            labs, wts = donors.setdefault(key, ([], []))
+            labs.append(meds[pi])
+            wts.append(max(1, int(item["pixels"])))
+    for pi, item in enumerate(out):
+        if item["reason"] != "no_visible_pixels" or str(pi) in overrides:
+            continue
+        old = (parts[pi].get("color") or "").upper()
+        if old and old != "#8A939E":              # 已有非默认灰旧色：保留
+            continue
+        group = donors.get(_prefix(parts[pi]["name"]))
+        if not group:
+            continue
+        med = weighted_median(np.stack(group[0]), np.array(group[1], dtype=float))
+        item.update({"hex": lab_hex(med), "fallback": True})
     return out
