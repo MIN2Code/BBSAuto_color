@@ -191,3 +191,22 @@ def test_manual_override_wins_over_accepted_region():
     assert slots[2] == 7
     assert slots[3] == 5
     assert slots.dtype == np.uint8
+
+
+def test_compose_face_rgb_priority_and_override():
+    from backend.face_candidates import CandidateRegion, compose_face_rgb
+    lo = CandidateRegion(0, frozenset({0, 1}), "#FF0000", 3, 0.9, True, "accepted")
+    hi = CandidateRegion(1, frozenset({1}), "#00FF00", 3, 0.95, True, "accepted")
+    rgb = compose_face_rgb(4, "#FFFFFF", [lo, hi], {})
+    assert rgb[0].tolist() == [255, 0, 0]
+    assert rgb[1].tolist() == [0, 255, 0]      # hi 置信先写，lo 不得覆盖
+    assert (rgb[2] == 255).all() and (rgb[3] == 255).all()
+    rgb2 = compose_face_rgb(4, "#FFFFFF", [lo], {1: "#0000FF"})
+    assert rgb2[1].tolist() == [0, 0, 255]     # 人工 override 永远赢
+
+
+def test_compose_face_rgb_empty_is_base():
+    from backend.face_candidates import compose_face_rgb
+    rgb = compose_face_rgb(3, "#123456", [], {})
+    assert rgb.shape == (3, 3)
+    assert (rgb == np.array([0x12, 0x34, 0x56], dtype=np.uint8)).all()

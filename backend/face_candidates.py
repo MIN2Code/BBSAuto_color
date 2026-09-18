@@ -267,6 +267,45 @@ def apply_face_layers(
     return slots
 
 
+def _hex_to_rgb8(hex_color: str) -> np.ndarray:
+    h = (hex_color or "").upper()
+    if not h.startswith("#") or len(h) != 7:
+        return np.array([128, 128, 128], dtype=np.uint8)   # 非法色回落中性灰
+    try:
+        return np.array([int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)],
+                        dtype=np.uint8)
+    except ValueError:
+        return np.array([128, 128, 128], dtype=np.uint8)
+
+
+def compose_face_rgb(
+    face_count: int,
+    base_hex: str,
+    accepted_regions: Iterable[CandidateRegion],
+    face_overrides: Mapping[int, str],
+) -> np.ndarray:
+    """合成每面连续 RGB（完整预览用，与打印槽 face_slots 无关）。
+
+    顺序固定：件级 base → 已接受区域 → 人工 override（永远赢）。区域重叠
+    按稳定优先级 (-confidence, -support_views, region_id) 先写者赢。
+    """
+    rgb = np.tile(_hex_to_rgb8(base_hex), (face_count, 1))
+    regions = sorted(accepted_regions,
+                     key=lambda r: (-r.confidence, -r.support_views, r.region_id))
+    written = np.zeros(face_count, dtype=bool)
+    for region in regions:
+        color = _hex_to_rgb8(region.color_hex)
+        faces = [int(f) for f in region.faces if 0 <= int(f) < face_count]
+        fresh = [f for f in faces if not written[f]]
+        if fresh:
+            rgb[fresh] = color
+            written[fresh] = True
+    for face, hex_color in face_overrides.items():
+        if 0 <= int(face) < face_count:
+            rgb[int(face)] = _hex_to_rgb8(hex_color)
+    return rgb
+
+
 def _array_from_view(view: Mapping[str, Any], *names: str) -> np.ndarray:
     value = _view_value(view, *names)
     if value is None:
