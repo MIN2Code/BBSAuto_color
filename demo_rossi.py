@@ -3,7 +3,7 @@ import sys, glob
 sys.path.insert(0, '.')
 import httpx
 
-BASE = 'http://127.0.0.1:8761/api'
+BASE = 'http://127.0.0.1:8762/api'
 c = httpx.Client(timeout=600)
 sid = c.post(f'{BASE}/sessions').json()['session_id']
 
